@@ -16,6 +16,90 @@ class Recording:
     timing_jitter: float | None
 
 
+def select_active_channels(recording, relative_threshold=0.05):
+    """Suggest active inputs from sustained AC activity, not single handling spikes.
+
+    Score = median of the strongest 1% of one-second AC-RMS blocks (at least three,
+    when available). Retain inputs
+    above a fraction of the strongest score. This is not hardware connection detection.
+    """
+    if not np.isfinite(relative_threshold) or not 0 < relative_threshold <= 1:
+        raise ValueError("Active-channel relative threshold must lie in (0, 1].")
+    block = min(len(recording.time), max(4, round(recording.sample_rate)))
+    scores = {}
+    for name, values in recording.channels.items():
+        usable = len(values) // block * block
+        rms = np.std(values[:usable].reshape(-1, block), axis=1)
+        strongest_count = min(len(rms), max(3, int(np.ceil(len(rms) * 0.01))))
+        scores[name] = float(np.median(np.partition(rms, -strongest_count)[-strongest_count:]))
+    strongest = max(scores.values())
+    included = sorted(
+        (name for name in scores if scores[name] >= strongest * relative_threshold),
+        key=lambda name: scores[name],
+        reverse=True,
+    )
+    report = {
+        "method": "relative sustained vibration activity",
+        "relative_threshold": relative_threshold,
+        "activity_score": scores,
+        "included": included,
+        "excluded": [name for name in scores if name not in included],
+        "note": "Amplitude-based suggestion. Select quiet sensors manually if they are required.",
+    }
+    return Recording(
+        recording.time,
+        {name: recording.channels[name] for name in included},
+        recording.sample_rate,
+        recording.timing_jitter,
+    ), report
+
+
+def select_interval(
+    recording, *, start_seconds=0.0, end_seconds=None, trim_start_seconds=0.0, trim_end_seconds=0.0
+):
+    """Select a half-open interval on the original elapsed timeline, then trim it.
+
+    Preserve original time coordinates so exported spectra can be traced to the source.
+    No samples are modified or resampled.
+    """
+    duration = float(recording.time[-1] + 1 / recording.sample_rate)
+    end = duration if end_seconds is None else end_seconds
+    settings = (start_seconds, end, trim_start_seconds, trim_end_seconds)
+    if not all(np.isfinite(value) for value in settings):
+        raise ValueError("Interval limits and trims must be finite.")
+    if not 0 <= start_seconds < end <= duration + 1e-8:
+        raise ValueError(f"Interval must satisfy 0 <= start < end <= {duration:.6g} seconds.")
+    if trim_start_seconds < 0 or trim_end_seconds < 0:
+        raise ValueError("Start and end trim must be non-negative.")
+    low, high = start_seconds + trim_start_seconds, end - trim_end_seconds
+    if low >= high:
+        raise ValueError("Trimming removes the entire selected interval; reduce the trims.")
+    first = int(np.searchsorted(recording.time, low, side="left"))
+    last = int(np.searchsorted(recording.time, high, side="left"))
+    if last - first < 4:
+        raise ValueError("Fewer than four samples remain after interval selection and trimming.")
+    selected = Recording(
+        recording.time[first:last],
+        {key: values[first:last] for key, values in recording.channels.items()},
+        recording.sample_rate,
+        recording.timing_jitter,
+    )
+    metadata = {
+        "source_samples": len(recording.time),
+        "selected_start_seconds": start_seconds,
+        "selected_end_seconds_exclusive": end,
+        "trim_start_seconds": trim_start_seconds,
+        "trim_end_seconds": trim_end_seconds,
+        "retained_start_sample": first,
+        "retained_end_sample_exclusive": last,
+        "retained_first_time_seconds": float(selected.time[0]),
+        "retained_last_time_seconds": float(selected.time[-1]),
+        "retained_duration_seconds": (last - first) / recording.sample_rate,
+        "time_coordinates": "elapsed seconds from first source CSV sample",
+    }
+    return selected, metadata
+
+
 def read_csv(
     path: str | Path,
     *,
@@ -69,7 +153,11 @@ def read_csv(
     if len(frame) < 4:
         raise ValueError("At least four samples are required.")
     if time_column is None and sample_rate is None:
-        candidates = [c for c in frame if c.lower() in {"time", "time_s", "timestamp", "t"}]
+        candidates = [
+            c
+            for c in frame
+            if c.lower() in {"time", "time_s", "timestamp", "t", "time (s)", "time [s]"}
+        ]
         if len(candidates) != 1:
             raise ValueError("Specify --time-column or --sample-rate; time column is ambiguous.")
         time_column = candidates[0]
@@ -100,7 +188,9 @@ def read_csv(
                 f"Uneven sampling ({jitter:.2%} maximum interval deviation). "
                 "Check dropped samples/time units or resample explicitly before analysis."
             )
-        inferred_rate = 1.0 / interval
+        # Rounded CSV timestamps can alternate between two interval lengths.
+        # Endpoint-average spacing avoids bias from their more frequent rounded value.
+        inferred_rate = (len(time) - 1) / (time[-1] - time[0])
         if sample_rate is not None and not np.isclose(
             sample_rate, inferred_rate, rtol=max(jitter_tolerance, 1e-6)
         ):
@@ -110,7 +200,12 @@ def read_csv(
         time = np.arange(len(frame)) / sample_rate
     if channels is None:
         channels = [
-            c for c in frame if c != time_column and pd.api.types.is_numeric_dtype(frame[c])
+            c
+            for c in frame
+            if c != time_column
+            and c.lower() not in {"sample", "sample index"}
+            and not (c.startswith("Unnamed:") and frame[c].isna().all())
+            and pd.api.types.is_numeric_dtype(frame[c])
         ]
     if not channels:
         raise ValueError("No numeric channels found. Select them explicitly with --channels.")

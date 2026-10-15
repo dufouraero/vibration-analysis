@@ -35,7 +35,29 @@ Windows must allow Windows Script Host and local PowerShell scripts for this lau
 3. Tick FFT, Waterfall, PSD, Spectrogram and/or Time trace individually.
 4. Click **Run selected analyses**, then **Open results folder** to view the PNGs.
 
-Each run gets a new timestamped output subfolder to preserve previous runs.
+Each desktop run gets a new output subfolder named from the vibration CSV plus
+a timestamp (including microseconds), preserving previous runs. The popup reserves
+this folder without overwriting an existing folder.
+The **Progress** tab shows only the main stages, test/operating-point progress,
+warnings and completion. The current sensor appears in the status line, without
+adding a message for every channel to the progress history. Detailed RMS values,
+sample counts and file paths remain available under **Technical details** and are
+saved as `analysis.log` in that run's parent folder when the analysis finishes.
+On failure, Technical details opens automatically.
+
+**Sensor selection:** the popup defaults to **Auto activity** under CSV settings.
+It compares sustained one-second AC-RMS activity and excludes inputs below 5% of
+the strongest channel's score. The score is the median of the strongest 1% of
+one-second blocks (at least three blocks when available), reducing sensitivity to
+single handling/startup bursts. Included channels and the excluded count are shown
+in Progress; names and scores are recorded in Technical details and summaries.
+This suggests active inputs; it does not detect physical sensor connections.
+For quiet sensors that you need to retain, choose **All channels** or click
+**Choose sensor channels…** and select the connected inputs explicitly. Explicit
+names override Auto activity. Each included sensor gets its own subfolder inside
+each test/point. With only one connected sensor, auto selection should normally
+leave one sensor subfolder. CLI defaults to all numeric channels; use
+`--active-channels` for the same automatic suggestion.
 The PSD checkbox generates both linear and log frequency plots. CSV and analysis
 settings are available in separate tabs, including optional RMS bands.
 
@@ -133,7 +155,7 @@ uv run vibration analyze --help
 
 | Option | Meaning / default |
 | --- | --- |
-| `--segment-seconds` | Welch PSD and waterfall window duration; 1 s |
+| `--segment-seconds` | Welch PSD and waterfall window duration; 0.5 s (500 ms) |
 | `--overlap` | Segment overlap fraction; 0.5 |
 | `--window` | `hann` (default), `hamming`, `flattop`, `boxcar` |
 | `--detrend` | `constant` removes mean; `linear` removes a fitted trend; `none` retains DC |
@@ -149,6 +171,137 @@ uv run vibration analyze --help
 | `--spectrogram-range-db` | Color range below maximum displayed PSD; 60 dB |
 | `--spectrogram-colormap` | `viridis` (default), `magma`, `turbo` |
 | `--spectrogram-interpolation` | `bilinear` display blending (default), or `nearest` to see individual cells |
+| `--start-seconds`, `--end-seconds` | Select a half-open source interval; default entire recording |
+| `--trim-start-seconds`, `--trim-end-seconds` | Trim inside selected interval; CLI default 0 each, desktop default 5 s each |
+
+### Interval selection and configurable trim
+
+The desktop **Interval & trim** tab lets you enter elapsed CSV start/end times
+and separate trim margins. A blank interval end means the end of the recording.
+The popup defaults to **5 s at the start and 5 s at the end**. Use **0** to disable
+either margin. Selecting a hold from 100 to 160 s with these margins analyses
+**105 <= t < 155 s**, retaining approximately 50 s. The synthetic demo resets both
+trims to 0 because its recording is only 8 seconds long.
+
+```powershell
+uv run vibration analyze data/run.csv --time-column time_s --channels accel_x --start-seconds 100 --end-seconds 160 --trim-start-seconds 5 --trim-end-seconds 5
+```
+
+Trimming applies before all analyses: FFT, PSD, waterfall, spectrogram, time trace
+and statistics use the same retained samples. `summary.json` records requested
+interval boundaries, trim settings, retained sample indices and retained duration.
+Plots and exported segment centers retain the **original CSV elapsed time**, so
+the analysed portion can be matched back to the source. FFT phase remains relative
+to the first retained sample. Trims that remove the interval or leave fewer than
+four samples are rejected. Welch still warns when there are too few samples for
+the requested window or fewer than two averaging segments.
+
+Without an RPM CSV, the interface analyses **one manually selected interval**.
+With an RPM CSV, it detects candidate runs and settled holds as described below.
+The interval limits restrict which tests are analysed; start/end trims apply to
+each detected hold. Whole-test plots retain startup, ramp, and shutdown transitions.
+Trimming is not a replacement for clock alignment or checking that a point has settled.
+
+### RPM CSV, detected tests, operating points and comparisons
+
+Choose the vibration CSV and the optional **RPM CSV** in the popup. The **RPM detection**
+tab provides automatic/manual alignment and configurable detection thresholds.
+A Grafana RPM export with a `Time` column and one numeric RPM column is supported
+directly. Other column names can be selected explicitly. Only RPM telemetry is
+currently supported in this workflow; current/voltage import is not implemented.
+
+The supplied datalogger format (`Sample`, `Time (s)`, sensor columns and an empty
+trailing column) is also supported directly: the sample counter and empty unnamed
+column are excluded from automatic signal selection. Select the useful sensor
+channels explicitly, particularly for alignment.
+
+The workflow produces one parent folder per desktop analysis:
+
+```text
+results/
+  Job1_2026-10-14T14-58-37-482_20261015_120000_123456/
+    alignment.json
+    detection_settings.json
+    detection_overview.png
+    analysis.log                   # desktop run's full technical output
+    tests.csv
+    test_01/
+      whole_test/
+        01_sensor_name/            # selected plots, spectra and summary
+      operating_points.csv        # suggested boundaries, trims, RPM spread, skips
+      operating_points/
+        point_01_4500rpm/
+          01_sensor_name/
+        point_02_5650rpm/
+          01_sensor_name/
+      comparisons/
+        01_sensor_name/
+          fft_rpm_waterfall.png
+          psd_comparison.png
+          operating_point_spectra.npz
+          operating_points.csv
+    test_02/
+      ...
+```
+
+The comparison waterfall belongs alongside whole-test and per-point results, inside
+each test's **comparisons** folder. It plots one **mean windowed FFT magnitude spectrum**
+per retained hold, using the same FFT window length at every point. It is not the
+full-record FFT from unequal-duration holds. Its numbered axis retains chronological
+point order and labels each point's mean RPM, keeping repeated speeds separate.
+Each point also exports its own full-record FFT. Comparison arrays and PSD overlays
+use the same window settings. FFT comparison magnitudes remain unfiltered; PSDs use
+the configured high-pass. Image creation follows the selected FFT/waterfall and PSD
+checkboxes; numerical comparison arrays are always exported when holds are available.
+
+**Clock alignment:** provide the timestamp corresponding to the first vibration
+sample, or leave it blank to read a timestamp such as `2026-10-14T14-58-37-482`
+from the vibration filename. Automatic mode searches ±300 seconds for agreement
+between engine running/downtime in RPM and the first selected sensor's vibration
+levels. It requires observable starts/stops in both sources, rejects weak or ambiguous
+matches, and is a **heuristic suggestion, not clock synchronization**. Its threshold,
+score and candidate offset range are recorded. Always inspect `detection_overview.png`.
+
+In Manual mode, the mapping is:
+`CSV elapsed seconds = RPM timestamp - vibration start timestamp + offset`.
+A positive offset moves RPM events **later** on the source CSV elapsed timeline.
+For the supplied exports an estimated offset around **+30 seconds** is consistent
+with the starts/stops. Do not assume it is correct for a new recording.
+Timezone-aware timestamps are normalized; naive timestamps are treated as a common
+nominal clock. If the sources use different zones, specify an explicit offset in
+the vibration start timestamp. Five-second telemetry cannot establish precise
+sub-second synchronization. The current model handles a constant offset, not clock
+drift or a logger that removes pauses from its exported timeline.
+
+**Run and hold detection:** default running threshold is 500 RPM, minimum test length
+30 s, minimum candidate hold length 30 s. A local 20 s regression identifies regions
+whose RPM trend is at most 2 RPM/s and scatter about that trend at most 40 RPM RMS.
+Continuous ramps above that slope are excluded; settled regions after ramps can
+qualify as new holds. Large telemetry gaps break tests. Very slow ramps can resemble
+drifting holds: tune the slope/scatter settings and review the suggested boundaries.
+The first hold is not automatically labelled warmup: RPM alone cannot determine intent
+or load, and a load change at constant RPM may not be detected. Short candidates are
+listed as skipped when trims leave too little data for two Welch windows or fewer
+than two RPM observations. Warmup/load labels and manual editing of individual
+suggested boundaries are not yet part of the popup; use manual interval mode to
+override a particular hold.
+
+```powershell
+uv run vibration analyze data/Job1_2026-10-14T14-58-37-482.csv --rpm-csv data/rpm.csv --channels "CMCP776A - 1060 (g)" --trim-start-seconds 5 --trim-end-seconds 5 --psd-highpass-hz 10 --output results/new_rpm_analysis
+```
+
+CLI RPM batch mode requires a **new or empty output folder**, refusing to overwrite
+previous batch results. Desktop mode creates that fresh parent folder automatically.
+
+### Welch window controls
+
+Under **Analysis settings**, the **Welch/waterfall window [s]** defaults to **0.5**,
+**Overlap fraction** defaults to **0.5**, and **Window** defaults to **Hann**.
+All three are configurable. At approximately 1706.67 samples/s, a 500 ms segment
+rounds to about 853 samples, with roughly 2 Hz frequency-bin spacing. The chosen
+window also broadens spectral lines, so bin spacing alone is not effective resolution.
+The summary records actual segment samples, bin spacing, overlap and average count.
+Spectrogram window duration and overlap remain independently configurable in their tab.
 
 ### PSD high-pass filter
 
@@ -204,7 +357,7 @@ Each channel gets a numbered, sanitized subfolder under `--output`:
 
 | File | Contents |
 | --- | --- |
-| `time.png` | Calibrated raw time signal (elapsed time starts at zero) |
+| `time.png` | Calibrated retained time signal, on the original CSV elapsed timeline |
 | `fft.png`, `fft.csv` | Full-record one-sided **peak** amplitude spectrum plus phase in radians in CSV |
 | `psd_linear_x.png` | Welch PSD, linear frequency axis, log density axis |
 | `psd_log_x.png` | Same Welch PSD, log frequency axis, log density axis; DC omitted |
@@ -222,8 +375,8 @@ For example, 200 displays up to 200 frames and 0 displays every frame. More fram
 can make a long recording slower to render and harder to read. The plot title and
 summary record the displayed and available counts; exports retain every complete frame
 regardless of this display setting. This is a time-based
-waterfall, not RPM/order tracking. RPM/order analysis can be added when your data format
-and tachometer/RPM signal are known.
+waterfall. The separate RPM workflow adds a comparison waterfall across detected holds;
+neither performs angle-resampled order tracking.
 
 FFT amplitude uses the coherent window gain: interior bins are
 `2 * abs(rfft(window * detrended_signal)) / sum(window)`. DC and even-length
@@ -259,7 +412,7 @@ import numpy as np
 
 data = np.load("results/01_accel_x/time_frequency.npz")
 frequency = data["frequency_hz"]
-time = data["time_s"]  # complete-window centers relative to first sample
+time = data["time_s"]  # complete-window centers on the original CSV elapsed timeline
 amplitude = data["peak_amplitude"]
 psd = data["psd"]
 # Spectrogram has its own, shorter window and denser time grid:

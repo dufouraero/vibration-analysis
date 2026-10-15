@@ -26,6 +26,10 @@ def test_form_maps_to_cli_without_shell(tmp_path):
         "spectrogram_interpolation": "bilinear",
         "waterfall_max_frames": "0",
         "psd_filter_order": "6",
+        "start_seconds": "100",
+        "end_seconds": "160",
+        "trim_start_seconds": "5",
+        "trim_end_seconds": "5",
     }
     args = parser().parse_args(build_arguments(values, ["fft", "psd"]))
     assert args.input == csv
@@ -40,6 +44,9 @@ def test_form_maps_to_cli_without_shell(tmp_path):
     assert args.spectrogram_interpolation == "bilinear"
     assert args.waterfall_max_frames == 0
     assert args.psd_filter_order == 6
+    assert args.start_seconds == 100 and args.end_seconds == 160
+    assert args.trim_start_seconds == 5 and args.trim_end_seconds == 5
+    assert args.segment_seconds == 0.5
 
 
 def test_form_requires_csv_and_plots(tmp_path):
@@ -49,3 +56,40 @@ def test_form_requires_csv_and_plots(tmp_path):
     csv.touch()
     with pytest.raises(ValueError, match="plot"):
         build_arguments({"input": str(csv), "output": str(tmp_path)}, [])
+
+
+def test_rpm_form_controls(tmp_path):
+    csv = tmp_path / "data.csv"
+    csv.touch()
+    rpm = tmp_path / "rpm.csv"
+    rpm.touch()
+    args = parser().parse_args(
+        build_arguments(
+            {
+                "input": str(csv),
+                "output": str(tmp_path),
+                "rpm_csv": str(rpm),
+                "rpm_alignment": "Manual",
+                "rpm_offset_seconds": "30",
+                "vibration_start": "2026-10-14T14:58:37.482",
+                "minimum_hold_seconds": "45",
+            },
+            ["fft"],
+        )
+    )
+    assert args.rpm_csv == rpm
+    assert args.rpm_offset_seconds == 30
+    assert args.minimum_hold_seconds == 45
+
+
+def test_gui_default_active_selection_and_all_override(tmp_path):
+    csv = tmp_path / "sensor.csv"
+    csv.touch()
+    settings = {"input": str(csv), "output": str(tmp_path)}
+    assert parser().parse_args(build_arguments(settings, ["fft"])).active_channels
+    settings["channel_mode"] = "All channels"
+    assert not parser().parse_args(build_arguments(settings, ["fft"])).active_channels
+    settings.update(channel_mode="Auto activity", channels="quiet sensor")
+    args = parser().parse_args(build_arguments(settings, ["fft"]))
+    assert args.channels == ["quiet sensor"]
+    assert not args.active_channels

@@ -10,7 +10,7 @@ def test_peak_scaling_and_phase(n):
     fs = n
     time = np.arange(n) / fs
     x = 3 * np.cos(2 * np.pi * 100 * time + 0.4)
-    result = analyze(x, fs, window="boxcar")
+    result = analyze(x, fs, window="boxcar", segment_seconds=1)
     assert result.amplitude[100] == pytest.approx(3, abs=1e-10)
     assert result.phase[100] == pytest.approx(0.4, abs=1e-10)
     assert result.summary["welch_rms"] == pytest.approx(3 / np.sqrt(2))
@@ -77,8 +77,8 @@ def test_highpass_suppresses_drift_preserves_fft_and_matches_scipy(order):
     fs = 1024
     t = np.arange(fs * 12) / fs
     x = 4 * np.sin(2 * np.pi * 2 * t) + 2 * np.sin(2 * np.pi * 100 * t)
-    raw = analyze(x, fs)
-    filtered = analyze(x, fs, psd_highpass_hz=10, psd_filter_order=order)
+    raw = analyze(x, fs, segment_seconds=1)
+    filtered = analyze(x, fs, psd_highpass_hz=10, psd_filter_order=order, segment_seconds=1)
     sos = signal.butter(order, 10, fs=fs, btype="highpass", output="sos")
     filtered_x = signal.sosfiltfilt(sos, x)
     _, expected = signal.welch(
@@ -112,7 +112,7 @@ def test_independent_spectrogram_matches_scipy():
     np.testing.assert_allclose(result.spectrogram_time, t)
     np.testing.assert_allclose(result.spectrogram_psd.T, density, rtol=1e-12, atol=1e-28)
     assert len(result.spectrogram_time) > len(result.time) * 10
-    changed = analyze(x, fs, spectrogram_seconds=0.2)
+    changed = analyze(x, fs, spectrogram_seconds=0.2, segment_seconds=1)
     np.testing.assert_array_equal(result.psd, changed.psd)
 
 

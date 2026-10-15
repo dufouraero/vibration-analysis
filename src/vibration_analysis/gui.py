@@ -1,5 +1,6 @@
 """Desktop front end for the same analysis commands as the CLI (standard-library Tk)."""
 
+import csv
 import os
 import queue
 import subprocess
@@ -9,6 +10,9 @@ import tkinter as tk
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+from tkinter.scrolledtext import ScrolledText
+
+from .progress import parse as parse_progress
 
 
 def build_arguments(settings, plots):
@@ -43,7 +47,32 @@ def build_arguments(settings, plots):
         "spectrogram_interpolation": "--spectrogram-interpolation",
         "waterfall_max_frames": "--waterfall-max-frames",
         "psd_filter_order": "--psd-filter-order",
+        "start_seconds": "--start-seconds",
+        "end_seconds": "--end-seconds",
+        "trim_start_seconds": "--trim-start-seconds",
+        "trim_end_seconds": "--trim-end-seconds",
     }
+    if settings.get("rpm_csv", "").strip():
+        if not Path(settings["rpm_csv"]).is_file():
+            raise ValueError(
+                "Choose an existing RPM CSV or leave it blank for manual interval analysis."
+            )
+        args.extend(["--rpm-csv", settings["rpm_csv"]])
+        mapping.update(
+            {
+                "rpm_time_column": "--rpm-time-column",
+                "rpm_column": "--rpm-column",
+                "vibration_start": "--vibration-start",
+                "rpm_alignment": "--rpm-alignment",
+                "rpm_offset_seconds": "--rpm-offset-seconds",
+                "running_rpm": "--running-rpm",
+                "minimum_run_seconds": "--minimum-run-seconds",
+                "minimum_hold_seconds": "--minimum-hold-seconds",
+                "rpm_stability_seconds": "--rpm-stability-seconds",
+                "rpm_slope_limit": "--rpm-slope-limit",
+                "rpm_scatter_limit": "--rpm-scatter-limit",
+            }
+        )
     for name, flag in mapping.items():
         value = settings.get(name, "").strip()
         if value:
@@ -56,6 +85,8 @@ def build_arguments(settings, plots):
     channels = [value.strip() for value in settings.get("channels", "").split(",") if value.strip()]
     if channels:
         args.extend(["--channels", *channels])
+    elif settings.get("channel_mode", "Auto activity") == "Auto activity":
+        args.append("--active-channels")
     if settings.get("no_header") == "1":
         args.append("--no-header")
     for band in settings.get("bands", "").split(","):
@@ -68,12 +99,14 @@ class App:
     def __init__(self, root):
         self.root = root
         self.root.title("Vibration analysis")
-        self.root.geometry("880x810")
-        self.root.minsize(780, 740)
+        self.root.geometry("1020x880")
+        self.root.minsize(960, 820)
         self.messages = queue.Queue()
         self.process = None
         self.busy = False
         self.last_output = None
+        self.log_output = None
+        self.completion_message = None
         self.variables = {}
         self.plot_variables = {}
         self.buttons = []
@@ -93,18 +126,24 @@ class App:
         self.button(paths, "Browse…", self.choose_csv, row=0, column=2)
         self.field(paths, "Output folder", "output", str(Path("results").resolve()), 1)
         self.button(paths, "Browse…", self.choose_output, row=1, column=2)
+        self.field(paths, "RPM CSV (optional)", "rpm_csv", "", 2)
+        self.button(paths, "Browse…", self.choose_rpm, row=2, column=2)
         self.button(
-            paths, "Try synthetic demo", self.demo, row=2, column=1, sticky="w", pady=(6, 0)
+            paths, "Try synthetic demo", self.demo, row=3, column=1, sticky="w", pady=(6, 0)
         )
         tabs = ttk.Notebook(outer)
         tabs.pack(fill="x", pady=12)
         csv_tab = ttk.Frame(tabs, padding=12)
         analysis_tab = ttk.Frame(tabs, padding=12)
         spectrogram_tab = ttk.Frame(tabs, padding=12)
+        interval_tab = ttk.Frame(tabs, padding=12)
+        rpm_tab = ttk.Frame(tabs, padding=12)
         tabs.add(csv_tab, text="CSV settings")
         tabs.add(analysis_tab, text="Analysis settings")
         tabs.add(spectrogram_tab, text="Spectrogram")
-        for tab in (csv_tab, analysis_tab, spectrogram_tab):
+        tabs.add(interval_tab, text="Interval & trim")
+        tabs.add(rpm_tab, text="RPM detection")
+        for tab in (csv_tab, analysis_tab, spectrogram_tab, interval_tab, rpm_tab):
             tab.columnconfigure(1, weight=1)
             tab.columnconfigure(3, weight=1)
         self.field(csv_tab, "Time column (blank = auto)", "time_column", "", 0)
@@ -113,7 +152,14 @@ class App:
         )
         self.field(csv_tab, "Sample rate [Hz] (if no time)", "sample_rate", "", 1)
         self.field(csv_tab, "Signal unit", "unit", "g", 1, 2)
-        self.field(csv_tab, "Channels (comma separated)", "channels", "", 2)
+        self.field(
+            csv_tab,
+            "Sensor selection",
+            "channel_mode",
+            "Auto activity",
+            2,
+            choices=["Auto activity", "All channels"],
+        )
         self.field(csv_tab, "Calibration multiplier", "scale", "1", 2, 2)
         self.field(
             csv_tab,
@@ -135,10 +181,20 @@ class App:
         ).grid(row=4, column=2, columnspan=2, sticky="w")
         ttk.Label(
             csv_tab,
-            text="Blank channels = all numeric columns except time. Unit changes labels; multiplier calibrates values.",
-            wraplength=750,
-        ).grid(row=5, column=0, columnspan=4, sticky="w", pady=(10, 0))
-        self.field(analysis_tab, "PSD/waterfall window [s]", "segment_seconds", "1", 0)
+            text="Auto activity excludes inputs with negligible vibration relative to the strongest. Explicit sensor names override it. Unit is a label; multiplier calibrates values.",
+            wraplength=900,
+        ).grid(row=6, column=0, columnspan=4, sticky="w", pady=(10, 0))
+        self.field(csv_tab, "Specific sensors (optional)", "channels", "", 5)
+        self.button(
+            csv_tab,
+            "Choose sensor channels…",
+            self.choose_channels,
+            row=5,
+            column=2,
+            columnspan=2,
+            sticky="w",
+        )
+        self.field(analysis_tab, "Welch/waterfall window [s]", "segment_seconds", "0.5", 0)
         self.field(analysis_tab, "Overlap fraction", "overlap", "0.5", 0, 2)
         self.field(
             analysis_tab,
@@ -162,6 +218,41 @@ class App:
             text="HPF applies to PSD, PSD-derived RMS and spectrogram. Order is per pass; forward–backward filtering doubles the roll-off order. FFT, waterfall and time trace use the original signal.",
             wraplength=750,
         ).grid(row=5, column=0, columnspan=4, sticky="w", pady=(10, 0))
+        self.field(interval_tab, "Interval start [s]", "start_seconds", "0", 0)
+        self.field(interval_tab, "Interval end [s] (blank = file end)", "end_seconds", "", 0, 2)
+        self.field(interval_tab, "Trim from start [s]", "trim_start_seconds", "5", 1)
+        self.field(interval_tab, "Trim from end [s]", "trim_end_seconds", "5", 1, 2)
+        ttk.Label(
+            interval_tab,
+            text=(
+                "Times are elapsed seconds in the source CSV. Trims apply inside the chosen interval, "
+                "before every analysis. Use 0 to disable. Example: a hold from 100 to 160 s with "
+                "5 s at each end retains 105–155 s. With an RPM CSV, limits restrict the tests and "
+                "trims apply to each detected hold; whole-test plots retain transitions."
+            ),
+            wraplength=750,
+        ).grid(row=5, column=0, columnspan=4, sticky="w", pady=(10, 0))
+        self.field(rpm_tab, "Vibration start timestamp", "vibration_start", "", 0)
+        self.field(rpm_tab, "Alignment mode", "rpm_alignment", "Auto", 0, 2, ["Auto", "Manual"])
+        self.field(rpm_tab, "Manual offset [s]", "rpm_offset_seconds", "0", 1)
+        self.field(rpm_tab, "Running threshold [RPM]", "running_rpm", "500", 1, 2)
+        self.field(rpm_tab, "Minimum test duration [s]", "minimum_run_seconds", "30", 2)
+        self.field(rpm_tab, "Minimum hold duration [s]", "minimum_hold_seconds", "30", 2, 2)
+        self.field(rpm_tab, "Stability window [s]", "rpm_stability_seconds", "20", 3)
+        self.field(rpm_tab, "Max RPM drift [RPM/s]", "rpm_slope_limit", "2", 3, 2)
+        self.field(rpm_tab, "Max scatter [RPM RMS]", "rpm_scatter_limit", "40", 4)
+        self.field(rpm_tab, "RPM value column (blank = auto)", "rpm_column", "", 4, 2)
+        self.field(rpm_tab, "RPM time column (blank = auto)", "rpm_time_column", "", 5)
+        ttk.Label(
+            rpm_tab,
+            text=(
+                "Blank start timestamp uses the vibration filename. Auto alignment matches starts/stops "
+                "within ±300 s using the first selected vibration channel. Inspect the overview before "
+                "accepting results. Positive manual offset moves RPM events later on the CSV timeline. "
+                "Holds are suggestions; gentle ramps and warmup need review."
+            ),
+            wraplength=900,
+        ).grid(row=6, column=0, columnspan=4, sticky="w", pady=(10, 0))
         self.field(spectrogram_tab, "Window duration [s]", "spectrogram_seconds", "0.1", 0)
         self.field(spectrogram_tab, "Overlap fraction", "spectrogram_overlap", "0.8", 0, 2)
         self.field(spectrogram_tab, "Color range [dB]", "spectrogram_range_db", "60", 1)
@@ -216,8 +307,16 @@ class App:
         self.progress.grid(row=0, column=2)
         self.status = tk.StringVar(value="Ready")
         ttk.Label(outer, textvariable=self.status).pack(anchor="w", pady=(0, 6))
-        self.log = tk.Text(outer, height=9, wrap="word", state="disabled", font=("Consolas", 9))
-        self.log.pack(fill="both", expand=True)
+        self.output_tabs = ttk.Notebook(outer)
+        self.output_tabs.pack(fill="both", expand=True)
+        self.log = ScrolledText(
+            self.output_tabs, height=8, wrap="word", state="disabled", font=("Segoe UI", 10)
+        )
+        self.details = ScrolledText(
+            self.output_tabs, height=8, wrap="word", state="disabled", font=("Consolas", 9)
+        )
+        self.output_tabs.add(self.log, text="Progress")
+        self.output_tabs.add(self.details, text="Technical details")
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.after(100, self.poll)
 
@@ -243,25 +342,120 @@ class App:
         )
         if filename:
             self.variables["input"].set(filename)
-            self.variables["output"].set(str(Path("results").resolve() / Path(filename).stem))
+            self.variables["output"].set(str(Path("results").resolve()))
 
     def choose_output(self):
         directory = filedialog.askdirectory()
         if directory:
             self.variables["output"].set(directory)
 
-    def append(self, text):
-        self.log.configure(state="normal")
-        self.log.insert("end", text)
-        self.log.see("end")
-        self.log.configure(state="disabled")
+    def choose_rpm(self):
+        filename = filedialog.askopenfilename(
+            filetypes=[("RPM CSV", "*.csv"), ("All files", "*.*")]
+        )
+        if filename:
+            self.variables["rpm_csv"].set(filename)
+
+    def choose_channels(self):
+        try:
+            settings = {key: var.get() for key, var in self.variables.items()}
+            with Path(settings["input"]).open(encoding="utf-8-sig", newline="") as stream:
+                skip = int(settings["skiprows"])
+                if skip < 0:
+                    raise ValueError("Metadata rows to skip cannot be negative.")
+                for _ in range(skip):
+                    stream.readline()
+                sample = stream.read(65536)
+            separators = {"Comma": ",", "Semicolon": ";", "Tab": "\t", "Pipe": "|"}
+            delimiter = separators.get(settings["delimiter"])
+            if delimiter is None:
+                try:
+                    delimiter = csv.Sniffer().sniff(sample, delimiters=",;\t|").delimiter
+                except csv.Error:
+                    delimiter = ","
+            row = next(csv.reader(sample.splitlines(), delimiter=delimiter))
+            names = (
+                [str(i) for i in range(len(row))]
+                if settings["no_header"] == "1"
+                else [c.strip() for c in row]
+            )
+            ignored = {
+                "sample",
+                "sample index",
+                "time",
+                "time_s",
+                "time (s)",
+                "time [s]",
+                "timestamp",
+                "t",
+                settings["time_column"].lower(),
+            }
+            names = [name for name in names if name and name.lower() not in ignored]
+            if not names:
+                raise ValueError("No signal column names found; check CSV settings.")
+        except (OSError, ValueError, StopIteration, csv.Error) as exc:
+            messagebox.showerror(
+                "Choose sensor channels",
+                f"Choose a CSV and check its delimiter/header settings first.\n{exc}",
+            )
+            return
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Choose sensor channels")
+        dialog.geometry("560x330")
+        dialog.transient(self.root)
+        ttk.Label(
+            dialog,
+            text="Select the connected sensor(s). This overrides automatic selection.",
+            wraplength=520,
+        ).pack(padx=15, pady=12)
+        options = tk.Listbox(dialog, selectmode="multiple", exportselection=False)
+        options.pack(fill="both", expand=True, padx=15)
+        current = {name.strip() for name in settings["channels"].split(",")}
+        for i, name in enumerate(names):
+            options.insert("end", name)
+            if name in current:
+                options.selection_set(i)
+
+        def apply():
+            selected = [names[i] for i in options.curselection()]
+            if not selected:
+                messagebox.showinfo(
+                    "Select a sensor", "Select at least one connected sensor.", parent=dialog
+                )
+                return
+            self.variables["channels"].set(", ".join(selected))
+            dialog.destroy()
+
+        ttk.Button(dialog, text="Use selected sensors", command=apply).pack(pady=12)
+        dialog.grab_set()
+
+    def append(self, text, *, details=False):
+        widget = self.details if details else self.log
+        widget.configure(state="normal")
+        widget.insert("end", text)
+        widget.see("end")
+        widget.configure(state="disabled")
 
     def launch(self, args, success):
+        for widget in (self.log, self.details):
+            widget.configure(state="normal")
+            widget.delete("1.0", "end")
+            widget.configure(state="disabled")
+        self.output_tabs.select(0)
+        self.completion_message = None
+        self.log_output = None
+        if args[0] == "analyze":
+            args = [*args, "--gui-progress"]
+            self.log_output = Path(args[args.index("--output") + 1])
+            self.append(f"Starting analysis: {Path(args[1]).name}\n")
+            self.append(f"Source: {args[1]}\nResults: {self.log_output}\n", details=True)
+        else:
+            self.append("Creating synthetic demo data…\n")
         self.busy = True
         for button in self.buttons:
             button.configure(state="disabled")
         self.progress.start()
-        self.status.set("Working…")
+        self.status.set("Starting…")
         python = (
             Path(sys.executable).with_name("python.exe")
             if os.name == "nt"
@@ -285,7 +479,7 @@ class App:
                 code = self.process.wait()
                 self.messages.put(("done", (code, success)))
             except (OSError, UnicodeError) as exc:
-                self.messages.put(("log", f"{exc}\n"))
+                self.messages.put(("log", f"Error: {exc}\n"))
                 self.messages.put(("done", (1, success)))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -295,7 +489,18 @@ class App:
             while True:
                 kind, value = self.messages.get_nowait()
                 if kind == "log":
-                    self.append(value)
+                    event = parse_progress(value)
+                    if event is not None:
+                        self.status.set(event["message"])
+                        self.append(event["message"] + "\n", details=True)
+                        if event.get("history", True):
+                            self.append(event["message"] + "\n")
+                        if event.get("complete"):
+                            self.completion_message = event["message"]
+                    else:
+                        self.append(value, details=True)
+                        if value.lstrip().startswith(("Warning:", "Error:")):
+                            self.append(value)
                 else:
                     self.busy = False
                     self.process = None
@@ -304,12 +509,24 @@ class App:
                         button.configure(state="normal")
                     code, success = value
                     self.status.set(
-                        success if code == 0 else "Analysis failed — see details below."
+                        (self.completion_message or success)
+                        if code == 0
+                        else "Analysis failed — open Technical details."
                     )
+                    if code == 0 and not self.completion_message:
+                        self.append(success + "\n")
+                    if self.log_output is not None and self.log_output.is_dir():
+                        try:
+                            (self.log_output / "analysis.log").write_text(
+                                self.details.get("1.0", "end-1c"), encoding="utf-8"
+                            )
+                        except OSError as exc:
+                            self.append(f"Warning: could not save the technical log: {exc}\n")
                     if code:
+                        self.output_tabs.select(1)
                         messagebox.showerror(
                             "Could not complete analysis",
-                            "Check the details below for the cause and adjust the CSV/settings.",
+                            "See Technical details for the error. The full log is saved with the results when possible.",
                         )
         except queue.Empty:
             pass
@@ -319,16 +536,19 @@ class App:
         try:
             settings = {key: var.get() for key, var in self.variables.items()}
             # Each click gets a separate folder to preserve earlier analyses.
-            destination = Path(settings["output"]) / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            destination = Path(settings["output"]) / (
+                Path(settings["input"]).stem + "_" + datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            )
             args = build_arguments(
                 settings, [name for name, var in self.plot_variables.items() if var.get()]
             )
             args[args.index("--output") + 1] = str(destination)
-        except ValueError as exc:
+            # Reserve a new root: never merge this run with existing results.
+            destination.mkdir(parents=True, exist_ok=False)
+        except (ValueError, OSError) as exc:
             messagebox.showerror("Check settings", str(exc))
             return
         self.last_output = destination
-        self.append(f"\nAnalyzing {settings['input']}\nResults: {destination}\n")
         self.launch(args, "Done — click Open results folder to view plots.")
 
     def demo(self):
@@ -349,7 +569,7 @@ class App:
             "fmin": "0",
             "fmax": "1000",
             "bands": "",
-            "segment_seconds": "1",
+            "segment_seconds": "0.5",
             "overlap": "0.5",
             "window": "hann",
             "detrend": "constant",
@@ -361,6 +581,12 @@ class App:
             "spectrogram_interpolation": "bilinear",
             "waterfall_max_frames": "60",
             "psd_filter_order": "4",
+            "start_seconds": "0",
+            "end_seconds": "",
+            "trim_start_seconds": "0",
+            "trim_end_seconds": "0",
+            "rpm_csv": "",
+            "channel_mode": "Auto activity",
         }.items():
             self.variables[key].set(value)
         self.launch(

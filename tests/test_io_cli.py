@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 
 from vibration_analysis.cli import main
-from vibration_analysis.io import read_csv
+from vibration_analysis.io import Recording, read_csv, select_active_channels, select_interval
 
 
 def test_semicolon_milliseconds_decimal_comma(tmp_path):
@@ -24,6 +24,46 @@ def test_headerless_without_time(tmp_path):
     rec = read_csv(path, header=False, channels=["1"], sample_rate=100)
     np.testing.assert_allclose(rec.time, [0, 0.01, 0.02, 0.03])
     assert list(rec.channels) == ["1"]
+
+
+def test_datalogger_export_columns(tmp_path):
+    path = tmp_path / "logger.csv"
+    path.write_text("Sample,Time (s),Sensor (g),\n0,0,1,\n1,0.001,2,\n2,0.002,3,\n3,0.003,4,\n")
+    rec = read_csv(path)
+    assert list(rec.channels) == ["Sensor (g)"]
+    assert rec.sample_rate == pytest.approx(1000)
+
+
+def test_quantized_timestamps_do_not_bias_sample_rate(tmp_path):
+    fs = 1706.6666666667
+    path = tmp_path / "rounded.csv"
+    t = np.round(np.arange(20000) / fs, 6)
+    pd.DataFrame({"time_s": t, "accel": np.ones(len(t))}).to_csv(path, index=False)
+    assert read_csv(path).sample_rate == pytest.approx(fs, abs=0.001)
+
+
+def test_active_channel_selection_ignores_unused_noise_and_single_burst():
+    fs = 128
+    t = np.arange(fs * 120) / fs
+    rng = np.random.default_rng(2)
+    active = 4 * np.sin(2 * np.pi * 20 * t)
+    unused = 0.02 * rng.normal(size=len(t))
+    unused[:8] = 50  # An isolated startup/handling burst must not dominate selection.
+    other_sensor = np.sin(2 * np.pi * 30 * t)
+    rec = Recording(
+        t, {"unused": unused, "connected": active, "second_connected": other_sensor}, fs, 0
+    )
+    selected, report = select_active_channels(rec)
+    assert list(selected.channels) == ["connected", "second_connected"]
+    assert report["excluded"] == ["unused"]
+
+
+def test_zero_activity_does_not_arbitrarily_discard_channels():
+    t = np.arange(1280) / 128
+    rec = Recording(t, {"one": np.zeros(len(t)), "two": np.zeros(len(t))}, 128, 0)
+    selected, report = select_active_channels(rec)
+    assert len(selected.channels) == 2
+    assert report["excluded"] == []
 
 
 def test_datetime(tmp_path):
@@ -92,7 +132,7 @@ def test_demo_and_all_exports(tmp_path):
     summary = json.loads((folder / "summary.json").read_text())
     assert summary["bands"][0]["rms"] == pytest.approx(0.75 / np.sqrt(2), rel=0.05)
     data = np.load(folder / "time_frequency.npz")
-    assert data["psd"].shape == (3, 2049)
+    assert data["psd"].shape == (7, 1025)
     assert data["spectrogram_psd"].shape[0] > data["psd"].shape[0]
 
 
@@ -149,3 +189,70 @@ def test_zero_short_record_plots(tmp_path):
 
 def test_cli_invalid_band_returns_error(tmp_path):
     assert main(["analyze", str(tmp_path / "unused.csv"), "--band", "bad"]) == 2
+
+
+def test_interval_trim_preserves_source_time_and_all_channels():
+    t = np.arange(2000) / 100
+    recording = Recording(t, {"x": t * 2, "y": t * 3}, 100, 0)
+    trimmed, info = select_interval(
+        recording, start_seconds=2, end_seconds=12, trim_start_seconds=1, trim_end_seconds=2
+    )
+    assert len(trimmed.time) == 700
+    assert trimmed.time[0] == 3
+    assert trimmed.time[-1] == 9.99
+    np.testing.assert_array_equal(trimmed.channels["y"], recording.channels["y"][300:1000])
+    assert info["retained_start_sample"] == 300
+    assert info["retained_end_sample_exclusive"] == 1000
+    assert info["retained_duration_seconds"] == 7
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"trim_start_seconds": -1},
+        {"trim_end_seconds": float("nan")},
+        {"trim_start_seconds": 5, "trim_end_seconds": 5},
+        {"start_seconds": 5, "end_seconds": 4},
+        {"end_seconds": 11},
+    ],
+)
+def test_invalid_interval_and_trim(settings):
+    recording = Recording(np.arange(1000) / 100, {"x": np.ones(1000)}, 100, None)
+    with pytest.raises(ValueError):
+        select_interval(recording, **settings)
+
+
+def test_cli_trim_controls_statistics_and_source_time_exports(tmp_path):
+    fs = 1000
+    time = np.arange(4000) / fs
+    values = np.sin(2 * np.pi * 50 * time)
+    values[:1000] += 100
+    source = tmp_path / "trim.csv"
+    pd.DataFrame({"time_s": time, "signal": values}).to_csv(source, index=False)
+    output = tmp_path / "output"
+    assert (
+        main(
+            [
+                "analyze",
+                str(source),
+                "--output",
+                str(output),
+                "--trim-start-seconds",
+                "1",
+                "--trim-end-seconds",
+                "1",
+                "--plots",
+                "psd",
+                "--dpi",
+                "40",
+            ]
+        )
+        == 0
+    )
+    summary = json.loads((output / "01_signal/summary.json").read_text())
+    assert summary["samples"] == 2000
+    assert summary["raw_rms"] == pytest.approx(1 / np.sqrt(2))
+    assert summary["analysis_interval"]["retained_duration_seconds"] == pytest.approx(2)
+    spectra = np.load(output / "01_signal/time_frequency.npz")
+    assert spectra["time_s"][0] == pytest.approx(1.25)
+    assert spectra["spectrogram_time_s"][0] == pytest.approx(1.05)

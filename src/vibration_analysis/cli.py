@@ -11,7 +11,8 @@ import pandas as pd
 from scipy import signal
 
 from .analysis import analyze
-from .io import read_csv
+from .io import read_csv, select_active_channels, select_interval
+from .progress import emit
 
 
 def parser():
@@ -24,7 +25,57 @@ def parser():
     demo.add_argument("--seed", type=int, default=42)
     run = sub.add_parser("analyze", help="Analyze one or more CSV signal columns.")
     run.add_argument("input", type=Path)
+    run.add_argument("--gui-progress", action="store_true", help=argparse.SUPPRESS)
     run.add_argument("--output", type=Path, default=Path("results"))
+    run.add_argument(
+        "--rpm-csv", type=Path, help="Optional RPM log: auto-detect tests and settled holds."
+    )
+    run.add_argument("--rpm-time-column")
+    run.add_argument("--rpm-column")
+    run.add_argument(
+        "--vibration-start", help="Timestamp matching the RPM clock; default from filename."
+    )
+    run.add_argument("--rpm-alignment", choices=["Auto", "Manual"], default="Auto")
+    run.add_argument(
+        "--rpm-offset-seconds",
+        type=float,
+        default=0,
+        help="Manual: add to RPM elapsed times to map them onto the vibration timeline.",
+    )
+    run.add_argument("--running-rpm", type=float, default=500)
+    run.add_argument("--minimum-run-seconds", type=float, default=30)
+    run.add_argument("--minimum-hold-seconds", type=float, default=30)
+    run.add_argument("--rpm-stability-seconds", type=float, default=20)
+    run.add_argument(
+        "--rpm-slope-limit",
+        type=float,
+        default=2,
+        help="Maximum local RPM drift per second for a hold.",
+    )
+    run.add_argument(
+        "--rpm-scatter-limit",
+        type=float,
+        default=40,
+        help="Maximum RPM RMS scatter about the local fitted trend.",
+    )
+    run.add_argument(
+        "--start-seconds", type=float, default=0, help="Interval start on the CSV elapsed timeline."
+    )
+    run.add_argument(
+        "--end-seconds", type=float, help="Interval end, exclusive; default end of recording."
+    )
+    run.add_argument(
+        "--trim-start-seconds",
+        type=float,
+        default=0,
+        help="Discard seconds after interval start; GUI default 5.",
+    )
+    run.add_argument(
+        "--trim-end-seconds",
+        type=float,
+        default=0,
+        help="Discard seconds before interval end; GUI default 5.",
+    )
     run.add_argument(
         "--time-column", help="Numeric or datetime column; auto-detect time/time_s/timestamp/t."
     )
@@ -33,6 +84,11 @@ def parser():
         "--sample-rate", type=float, help="Hz; required if no time column is available."
     )
     run.add_argument("--channels", nargs="+", help="Default: all numeric columns except time.")
+    run.add_argument(
+        "--active-channels",
+        action="store_true",
+        help="Automatically exclude inputs with negligible activity relative to the strongest; explicit --channels overrides.",
+    )
     run.add_argument("--delimiter", help="Default: auto-detect. Use ';' for semicolon CSVs.")
     run.add_argument("--decimal", choices=[".", ","], default=".")
     run.add_argument(
@@ -56,8 +112,8 @@ def parser():
     run.add_argument(
         "--segment-seconds",
         type=float,
-        default=1,
-        help="Welch/waterfall/spectrogram window duration.",
+        default=0.5,
+        help="Welch PSD and waterfall window duration (default 0.5 s).",
     )
     run.add_argument(
         "--overlap", type=float, default=0.5, help="Fraction of segment length, 0 <= overlap < 1."
@@ -147,6 +203,7 @@ def make_demo(args):
 
 
 def run_analysis(args):
+    emit(args, "Reading the vibration CSV…")
     bands = []
     for band in args.band:
         pair = band.split(":")
@@ -165,6 +222,46 @@ def run_analysis(args):
         time_unit=args.time_unit,
         jitter_tolerance=args.timing_tolerance,
         scale=args.scale,
+    )
+    available_count = len(recording.channels)
+    args.channel_selection_report = None
+    if args.active_channels and args.channels is None:
+        emit(args, "Identifying active sensor channels…", history=False)
+        recording, args.channel_selection_report = select_active_channels(recording)
+        emit(
+            args,
+            f"Auto selection: using {len(recording.channels)} of {available_count} channels. "
+            f"Excluded {available_count - len(recording.channels)} with negligible relative activity.",
+        )
+        print("Channel selection details: " + json.dumps(args.channel_selection_report), flush=True)
+    else:
+        emit(
+            args,
+            f"Using {len(recording.channels)} sensor channel(s). Results use one subfolder per sensor.",
+        )
+    print("Selected sensors: " + ", ".join(recording.channels), flush=True)
+    if args.rpm_csv is not None:
+        from .batch import run_rpm_analysis
+
+        return run_rpm_analysis(args, recording, bands)
+    recording, interval = select_interval(
+        recording,
+        start_seconds=args.start_seconds,
+        end_seconds=args.end_seconds,
+        trim_start_seconds=args.trim_start_seconds,
+        trim_end_seconds=args.trim_end_seconds,
+    )
+    emit(args, "Generating plots and numerical results…")
+    reports = export_recording(args, recording, interval, bands)
+    emit(args, "Complete — results are ready.", complete=True)
+    return reports
+
+
+def export_recording(args, recording, interval, bands, context=None):
+    print(
+        f"Retained CSV interval: {interval['retained_first_time_seconds']:.6g}–"
+        f"{interval['retained_last_time_seconds']:.6g} s "
+        f"({interval['retained_duration_seconds']:.6g} s, {len(recording.time)} samples)."
     )
     fmax = recording.sample_rate / 2 if args.fmax is None else args.fmax
     if not (
@@ -187,8 +284,11 @@ def run_analysis(args):
         re.sub(r"[^a-zA-Z0-9_.-]+", "_", c).strip("._")[:80] or "channel"
         for c in recording.channels
     ]
+    reports = []
     # Numeric prefix prevents sanitized-name collisions and Windows reserved names.
     for index, ((name, values), safe) in enumerate(zip(recording.channels.items(), names), 1):
+        prefix = getattr(args, "progress_context", "Generating results")
+        emit(args, f"{prefix} · Sensor {index}/{len(names)}: {name}", history=False)
         result = analyze(
             values,
             recording.sample_rate,
@@ -202,6 +302,9 @@ def run_analysis(args):
             spectrogram_seconds=args.spectrogram_seconds,
             spectrogram_overlap=args.spectrogram_overlap,
         )
+        # Keep the source time reference in both figures and numerical exports.
+        result.time += recording.time[0]
+        result.spectrogram_time += recording.time[0]
         if result.summary["segment_was_shortened"]:
             print(f"Warning: {name}: segment shortened to the record length.", file=sys.stderr)
         if result.summary["segment_count"] < 2:
@@ -247,6 +350,9 @@ def run_analysis(args):
             "unit": args.unit,
             "calibration_scale": args.scale,
             "timing_jitter": recording.timing_jitter,
+            "analysis_interval": interval,
+            "operating_context": context,
+            "channel_selection": getattr(args, "channel_selection_report", None),
             "csv_options": {
                 k: getattr(args, k)
                 for k in (
@@ -299,6 +405,17 @@ def run_analysis(args):
             f"{name}: raw RMS={summary['raw_rms']:.5g}, Welch RMS={summary['welch_rms']:.5g} "
             f"{args.unit}; peak={summary['peak_absolute']:.5g} {args.unit} -> {directory.resolve()}"
         )
+        reports.append(
+            {
+                "channel": name,
+                "folder": directory.name,
+                "frequency": result.frequency,
+                "mean_amplitude": result.window_amplitude.mean(axis=0),
+                "psd": result.psd,
+                "summary": summary,
+            }
+        )
+    return reports
 
 
 def main(argv=None):

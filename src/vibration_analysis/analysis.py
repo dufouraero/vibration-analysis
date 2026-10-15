@@ -59,7 +59,7 @@ def analyze(
     *,
     window="hann",
     detrend="constant",
-    segment_seconds=1.0,
+    segment_seconds=0.5,
     overlap=0.5,
     bands=(),
     psd_highpass_hz=0.0,
