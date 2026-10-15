@@ -1,0 +1,14 @@
+.venv/
+.uv-cache/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+dist/
+*.egg-info/
+data/*
+!data/.gitkeep
+results/
+.DS_Store
+setup.log
+.pytest-tmp/

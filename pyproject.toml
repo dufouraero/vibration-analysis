@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vibration-analysis"
+version = "0.1.0"
+description = "CSV vibration analysis: FFT, Welch PSD, waterfall and spectrogram"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["numpy>=2.0,<3", "scipy>=1.14,<2", "pandas>=2.2,<4", "matplotlib>=3.9,<4"]
+
+[project.scripts]
+vibration = "vibration_analysis.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

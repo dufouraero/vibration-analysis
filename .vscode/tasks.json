@@ -1,0 +1,30 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Prepare vibration environment",
+            "type": "process",
+            "command": "uv",
+            "windows": {
+                "command": "${env:USERPROFILE}\\.local\\bin\\uv.exe"
+            },
+            "args": ["sync", "--locked"],
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": [],
+            "presentation": { "reveal": "silent", "panel": "dedicated", "close": true }
+        },
+        {
+            "label": "Open Vibration Analysis",
+            "type": "process",
+            "command": "uv",
+            "windows": {
+                "command": "${env:USERPROFILE}\\.local\\bin\\uv.exe"
+            },
+            "args": ["run", "--locked", "python", "-m", "vibration_analysis.gui"],
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": [],
+            "group": { "kind": "build", "isDefault": true },
+            "presentation": { "reveal": "silent", "panel": "dedicated", "close": true }
+        }
+    ]
+}
