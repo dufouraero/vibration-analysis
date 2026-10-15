@@ -174,7 +174,35 @@ uv run vibration analyze --help
 | `--start-seconds`, `--end-seconds` | Select a half-open source interval; default entire recording |
 | `--trim-start-seconds`, `--trim-end-seconds` | Trim inside selected interval; CLI default 0 each, desktop default 5 s each |
 
-### Interval selection and configurable trim
+### Grafana local clock-time window
+
+In the desktop **Grafana time window** tab, enter optional local start/end values
+using the same clock as the Grafana dashboard. For example:
+
+```text
+Grafana start:    2026-10-14 16:01:00
+Grafana end:      2026-10-14 16:09:30
+Display timezone: Europe/Zurich
+```
+
+You can also enter `16:01:00` and `16:09:30`; time-only entries use the first date
+of the RPM export in that local clock. For overnight or multi-day recordings, use
+full dates. A blank bound leaves that side unrestricted. The timezone is an IANA
+name such as `Europe/Zurich` or `UTC`; match the Grafana display setting.
+
+An RPM CSV is required for this clock-time selection. The app first aligns the
+timelines, then converts your requested bounds to elapsed vibration time using
+the estimated/manual offset. **Do not manually add the alignment offset to the
+times you enter.** The Grafana window intersects any elapsed-time interval limits.
+Whole-test and per-point plots, FFT/PSD exports and RMS statistics are restricted
+to that intersection; the end is exclusive. Hold trims are applied inside it.
+Alignment can inspect the full recording for shared starts/stops, but samples
+outside your selected window do not enter the exported spectra or statistics.
+`alignment.json` records both requested local bounds and the final source-time bounds.
+
+CLI equivalents are `--grafana-start`, `--grafana-end`, and `--grafana-timezone`.
+
+### Elapsed interval and trim
 
 The desktop **Interval & trim** tab lets you enter elapsed CSV start/end times
 and separate trim margins. A blank interval end means the end of the recording.
@@ -237,6 +265,7 @@ results/
       comparisons/
         01_sensor_name/
           fft_rpm_waterfall.png
+          fft_rpm_waterfall_2d.png
           psd_comparison.png
           operating_point_spectra.npz
           operating_points.csv
@@ -254,6 +283,14 @@ use the same window settings. FFT comparison magnitudes remain unfiltered; PSDs 
 the configured high-pass. Image creation follows the selected FFT/waterfall and PSD
 checkboxes; numerical comparison arrays are always exported when holds are available.
 
+The **2D waterfall** is a single figure with one stacked FFT line plot per detected
+RPM hold, sharing the frequency axis and physical amplitude scale. Rows are numbered
+chronologically and labelled with their mean RPM. No per-row amplitude normalization
+is applied, so vibration levels remain comparable. It uses the same averaged window
+magnitudes as the 3D comparison and is saved automatically when FFT or waterfall plots
+are selected in RPM mode. These are detected operating points, not arbitrary bins
+through a ramp; repeat visits to the same RPM remain separate rows.
+
 **Clock alignment:** provide the timestamp corresponding to the first vibration
 sample, or leave it blank to read a timestamp such as `2026-10-14T14-58-37-482`
 from the vibration filename. Automatic mode searches ±300 seconds for agreement
@@ -267,9 +304,10 @@ In Manual mode, the mapping is:
 A positive offset moves RPM events **later** on the source CSV elapsed timeline.
 For the supplied exports an estimated offset around **+30 seconds** is consistent
 with the starts/stops. Do not assume it is correct for a new recording.
-Timezone-aware timestamps are normalized; naive timestamps are treated as a common
-nominal clock. If the sources use different zones, specify an explicit offset in
-the vibration start timestamp. Five-second telemetry cannot establish precise
+Timezone-aware timestamps retain their actual instants. Naive RPM timestamps and the
+vibration filename/start timestamp use the chosen Grafana display timezone (default
+Europe/Zurich). If the logger uses a different clock zone, specify an explicit offset
+in its start timestamp. Five-second telemetry cannot establish precise
 sub-second synchronization. The current model handles a constant offset, not clock
 drift or a logger that removes pauses from its exported timeline.
 

@@ -93,3 +93,22 @@ def test_gui_default_active_selection_and_all_override(tmp_path):
     args = parser().parse_args(build_arguments(settings, ["fft"]))
     assert args.channels == ["quiet sensor"]
     assert not args.active_channels
+
+
+def test_grafana_window_form_and_missing_rpm_validation(tmp_path):
+    csv = tmp_path / "vibration.csv"
+    csv.touch()
+    settings = {
+        "input": str(csv),
+        "output": str(tmp_path),
+        "grafana_start": "16:01:00",
+        "grafana_end": "16:09:30",
+        "grafana_timezone": "Europe/Zurich",
+    }
+    with pytest.raises(ValueError, match="RPM CSV"):
+        build_arguments(settings, ["fft"])
+    settings["rpm_csv"] = str(csv)
+    args = parser().parse_args(build_arguments(settings, ["fft"]))
+    assert args.grafana_start == "16:01:00"
+    assert args.grafana_end == "16:09:30"
+    assert args.grafana_timezone == "Europe/Zurich"

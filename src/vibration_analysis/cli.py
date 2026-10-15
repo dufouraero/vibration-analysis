@@ -31,6 +31,16 @@ def parser():
         "--rpm-csv", type=Path, help="Optional RPM log: auto-detect tests and settled holds."
     )
     run.add_argument("--rpm-time-column")
+    run.add_argument(
+        "--grafana-start",
+        help="Optional local Grafana window start: YYYY-MM-DD HH:MM:SS or HH:MM:SS.",
+    )
+    run.add_argument("--grafana-end", help="Optional local Grafana window end, exclusive.")
+    run.add_argument(
+        "--grafana-timezone",
+        default="Europe/Zurich",
+        help="Grafana display timezone (default Europe/Zurich).",
+    )
     run.add_argument("--rpm-column")
     run.add_argument(
         "--vibration-start", help="Timestamp matching the RPM clock; default from filename."
@@ -203,6 +213,10 @@ def make_demo(args):
 
 
 def run_analysis(args):
+    if (args.grafana_start or args.grafana_end) and args.rpm_csv is None:
+        raise ValueError(
+            "A Grafana clock-time window requires an RPM CSV for alignment. Otherwise use elapsed interval limits."
+        )
     emit(args, "Reading the vibration CSV…")
     bands = []
     for band in args.band:

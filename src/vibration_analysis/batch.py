@@ -7,7 +7,13 @@ import numpy as np
 import pandas as pd
 
 from .io import select_interval
-from .operating_points import detect_runs_and_holds, estimate_offset, read_rpm, source_origin
+from .operating_points import (
+    detect_runs_and_holds,
+    estimate_offset,
+    grafana_window,
+    read_rpm,
+    source_origin,
+)
 from .progress import emit
 
 
@@ -15,7 +21,7 @@ def _json(path, value):
     path.write_text(json.dumps(value, indent=2, allow_nan=False) + "\n", encoding="utf-8")
 
 
-def _overview(args, recording, time, rpm, runs):
+def _overview(args, recording, time, rpm, runs, bounds=None):
     from .plots import plt
 
     fig, axes = plt.subplots(2, 1, figsize=(12, 6), sharex=True, layout="constrained")
@@ -35,17 +41,22 @@ def _overview(args, recording, time, rpm, runs):
         yscale="log", ylabel="Reference-channel AC RMS", xlabel="Source CSV elapsed time [min]"
     )
     axes[0].set_xlim(max(recording.time[0], time[0]) / 60, min(recording.time[-1], time[-1]) / 60)
+    if bounds is not None:
+        axes[0].set_xlim(bounds[0] / 60, bounds[1] / 60)
     for index, run in enumerate(runs, 1):
+        visible_start = max(run["start"], bounds[0]) if bounds else run["start"]
+        visible_end = min(run["end"], bounds[1]) if bounds else run["end"]
         for ax in axes:
-            ax.axvspan(run["start"] / 60, run["end"] / 60, alpha=0.05, color="black")
+            ax.axvspan(visible_start / 60, visible_end / 60, alpha=0.05, color="black")
             for hold in run["holds"]:
                 ax.axvspan(hold["start"] / 60, hold["end"] / 60, alpha=0.15, color="#0f766e")
         axes[0].text(
-            run["start"] / 60,
+            visible_start / 60,
             0.96,
             f" Test {index}",
             transform=axes[0].get_xaxis_transform(),
             va="top",
+            clip_on=True,
         )
     for ax in axes:
         ax.grid(alpha=0.2)
@@ -102,6 +113,33 @@ def _comparisons(args, root, points, unit):
             ax.view_init(elev=28, azim=-65)
             fig.savefig(directory / "fft_rpm_waterfall.png", dpi=args.dpi, bbox_inches="tight")
             plt.close(fig)
+            fig, rows = plt.subplots(
+                len(means),
+                1,
+                sharex=True,
+                sharey=True,
+                squeeze=False,
+                figsize=(12, max(3.5, 1.65 * len(means) + 1.2)),
+                layout="constrained",
+            )
+            maximum = max(float(amplitude[:, selected].max()) * 1.08, 1e-12)
+            for i, (axis, spectrum) in enumerate(zip(rows[:, 0], amplitude)):
+                color = f"C{i % 10}"
+                axis.plot(frequency[selected], spectrum[selected], lw=0.9, color=color)
+                axis.fill_between(frequency[selected], spectrum[selected], alpha=0.08, color=color)
+                axis.set(ylim=(0, maximum), xlim=(args.fmin, args.fmax or frequency[-1]))
+                axis.set_ylabel(
+                    f"{i + 1}: {means[i]:.0f} RPM", rotation=0, ha="right", va="center", labelpad=14
+                )
+                axis.grid(alpha=0.2)
+            rows[-1, 0].set_xlabel("Frequency [Hz]")
+            fig.supylabel(f"Mean window FFT peak amplitude [{unit}]")
+            fig.suptitle(
+                f"{reports[0]['channel']} | 2D FFT waterfall by operating point\n"
+                f"{args.segment_seconds:g} s {args.window} windows · same amplitude scale in every row · unfiltered"
+            )
+            fig.savefig(directory / "fft_rpm_waterfall_2d.png", dpi=args.dpi, bbox_inches="tight")
+            plt.close(fig)
         if any(p in args.plots for p in ("all", "psd")):
             fig, ax = plt.subplots(figsize=(11, 5), layout="constrained")
             for i, density in enumerate(psd):
@@ -137,9 +175,11 @@ def run_rpm_analysis(args, recording, bands):
         trim_start_seconds=args.trim_start_seconds,
         trim_end_seconds=args.trim_end_seconds,
     )
-    rpm_seconds, rpm, columns = read_rpm(args.rpm_csv, args.rpm_time_column, args.rpm_column)
+    rpm_seconds, rpm, columns = read_rpm(
+        args.rpm_csv, args.rpm_time_column, args.rpm_column, timezone=args.grafana_timezone
+    )
     emit(args, "Aligning RPM and vibration timelines…")
-    origin = source_origin(args.input, args.vibration_start)
+    origin = source_origin(args.input, args.vibration_start, timezone=args.grafana_timezone)
     if args.rpm_alignment == "Auto":
         offset, alignment = estimate_offset(recording, rpm_seconds, rpm, origin, args.running_rpm)
     else:
@@ -158,7 +198,8 @@ def run_rpm_analysis(args, recording, bands):
             "vibration_origin_timestamp_epoch_s": origin,
             "offset_seconds_added_to_rpm_elapsed": offset,
             "mapping": "CSV elapsed = RPM timestamp - vibration origin + offset",
-            "clock_note": "Naive timestamps are treated as a common nominal clock. Specify timezone offsets explicitly if sources use different zones.",
+            "grafana_display_timezone": args.grafana_timezone,
+            "clock_note": "Naive RPM timestamps and the filename/start timestamp use the Grafana display timezone. Explicit offsets are honoured.",
         }
     )
     print(f"RPM alignment offset: {offset:+g} s; {alignment['method']}.", flush=True)
@@ -176,8 +217,30 @@ def run_rpm_analysis(args, recording, bands):
     end = recording.time[-1] + 1 / recording.sample_rate
     high = end if args.end_seconds is None else min(end, args.end_seconds)
     low = max(0, args.start_seconds)
+    if args.grafana_start or args.grafana_end:
+        window_low, window_high, selection = grafana_window(
+            args.grafana_start,
+            args.grafana_end,
+            rpm_seconds=rpm_seconds,
+            origin=origin,
+            offset=offset,
+            timestamps_have_timezone=True,
+            timezone=args.grafana_timezone,
+        )
+        if window_low is not None:
+            low = max(low, window_low)
+        if window_high is not None:
+            high = min(high, window_high)
+        alignment["grafana_time_window"] = selection
+        emit(
+            args,
+            f"Grafana window: {args.grafana_start or 'recording start'} to {args.grafana_end or 'recording end'} ({args.grafana_timezone}).",
+        )
     if not np.isfinite(low) or not np.isfinite(high) or not 0 <= low < high <= end:
-        raise ValueError("Selected analysis limits must lie within the recording.")
+        raise ValueError(
+            "Selected time window has no valid overlap with the vibration recording. Check date, timezone and alignment."
+        )
+    alignment["analysed_source_window_seconds"] = {"start": low, "end_exclusive": high}
     runs = [
         r for r in runs if min(r["end"], high) - max(r["start"], low) >= args.minimum_run_seconds
     ]
@@ -207,7 +270,7 @@ def run_rpm_analysis(args, recording, bands):
             )
         },
     )
-    _overview(args, recording, time, rpm, runs)
+    _overview(args, recording, time, rpm, runs, bounds=(low, high))
     test_rows = []
     for index, run in enumerate(runs, 1):
         test_label = f"Test {index}/{len(runs)}"
@@ -217,7 +280,7 @@ def run_rpm_analysis(args, recording, bands):
         whole, interval = select_interval(recording, start_seconds=start, end_seconds=stop)
         context = {
             "test": index,
-            "scope": "whole test; includes startup, transitions and shutdown",
+            "scope": "detected test within selected time window; transitions retained where included",
             "alignment": alignment,
         }
         export_recording(

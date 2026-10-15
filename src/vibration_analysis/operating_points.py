@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 
-def read_rpm(path, time_column=None, value_column=None):
+def read_rpm(path, time_column=None, value_column=None, timezone=None):
     frame = pd.read_csv(path)
     if time_column is None:
         candidates = [c for c in frame if c.lower().strip() in {"time", "timestamp", "datetime"}]
@@ -24,8 +24,13 @@ def read_rpm(path, time_column=None, value_column=None):
                 "Specify the RPM value column; more than one numeric column is present."
             )
         value_column = candidates[0]
-    # UTC normalizes aware timestamps; naive strings use a common nominal clock.
-    time = pd.to_datetime(frame[time_column], utc=True, errors="raise")
+    explicit_zone = pd.Timestamp(frame[time_column].iloc[0]).tzinfo is not None
+    if explicit_zone:
+        time = pd.to_datetime(frame[time_column], utc=True, errors="raise")
+    else:
+        time = pd.to_datetime(frame[time_column], errors="raise").dt.tz_localize(
+            timezone or "UTC", ambiguous="raise", nonexistent="raise"
+        )
     seconds = time.dt.as_unit("ns").astype("int64").to_numpy() / 1e9
     rpm = pd.to_numeric(frame[value_column], errors="raise").to_numpy(dtype=float)
     if len(rpm) < 3 or time.isna().any() or not np.isfinite(rpm).all() or np.any(rpm < 0):
@@ -41,21 +46,89 @@ def read_rpm(path, time_column=None, value_column=None):
             "time_column": time_column,
             "value_column": value_column,
             "median_interval_seconds": float(np.median(np.diff(seconds))),
+            "timestamps_have_timezone": explicit_zone,
+            "naive_timestamp_timezone": timezone or "UTC (nominal clock)",
         },
     )
 
 
-def source_origin(path, supplied=None):
+def grafana_window(
+    start,
+    end,
+    *,
+    rpm_seconds,
+    origin,
+    offset,
+    timestamps_have_timezone=False,
+    timezone="Europe/Zurich",
+):
+    """Map Grafana wall-clock bounds onto aligned source CSV elapsed seconds.
+
+    Naive exports retain their nominal wall clock, matching read_rpm. Aware exports
+    use UTC instants. Time-only entries use the first RPM date in that clock.
+    """
+    try:
+        clock = pd.Timestamp(rpm_seconds[0], unit="s", tz="UTC")
+        local_clock = clock.tz_convert(timezone)
+        date = (local_clock if timestamps_have_timezone else clock).date().isoformat()
+
+        def convert(value):
+            if not value or not value.strip():
+                return None
+            text = value.strip()
+            if re.fullmatch(r"\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?", text):
+                text = date + " " + text
+            stamp = pd.Timestamp(text)
+            if pd.isna(stamp):
+                raise ValueError("Timestamp is missing.")
+            if timestamps_have_timezone:
+                stamp = (
+                    stamp.tz_localize(timezone, ambiguous="raise", nonexistent="raise")
+                    if stamp.tzinfo is None
+                    else stamp
+                )
+                instant = stamp.timestamp()
+            else:
+                if stamp.tzinfo is not None:
+                    stamp = stamp.tz_convert(timezone).tz_localize(None)
+                instant = stamp.tz_localize("UTC").timestamp()
+            return instant - origin + offset
+
+        low, high = convert(start), convert(end)
+    except (ValueError, TypeError, KeyError) as exc:
+        raise ValueError(
+            "Invalid Grafana time window or timezone. Use YYYY-MM-DD HH:MM:SS or HH:MM:SS and a valid zone such as Europe/Zurich."
+        ) from exc
+    if low is not None and high is not None and low >= high:
+        raise ValueError(
+            "Grafana window end must be after its start; include full dates for overnight windows."
+        )
+    return (
+        low,
+        high,
+        {
+            "requested_start": start or None,
+            "requested_end": end or None,
+            "timezone": timezone,
+            "rpm_timestamps_have_timezone": timestamps_have_timezone,
+            "source_start_seconds": low,
+            "source_end_seconds_exclusive": high,
+            "time_only_date": date,
+        },
+    )
+
+
+def source_origin(path, supplied=None, timezone=None):
     if supplied:
-        stamp = pd.to_datetime(supplied, utc=True, errors="raise")
+        stamp = pd.Timestamp(supplied)
     else:
         match = re.search(r"(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})(?:-(\d{3}))?", Path(path).stem)
         if not match:
             raise ValueError("Enter the vibration start timestamp to align with the RPM log.")
         date, clock = match[1].split("T")
-        stamp = pd.to_datetime(
-            date + "T" + clock.replace("-", ":") + "." + (match[2] or "000"), utc=True
-        )
+        stamp = pd.Timestamp(date + "T" + clock.replace("-", ":") + "." + (match[2] or "000"))
+    if stamp.tzinfo is None:
+        stamp = stamp.tz_localize(timezone or "UTC", ambiguous="raise", nonexistent="raise")
     return stamp.timestamp()
 
 

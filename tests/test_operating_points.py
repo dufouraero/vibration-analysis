@@ -11,6 +11,7 @@ from vibration_analysis.io import Recording
 from vibration_analysis.operating_points import (
     detect_runs_and_holds,
     estimate_offset,
+    grafana_window,
     read_rpm,
     source_origin,
 )
@@ -31,6 +32,107 @@ def test_rpm_timestamp_units_and_timezone(tmp_path):
 def test_filename_origin():
     value = source_origin("Job1_2026-10-14T14-58-37-482.csv")
     assert value == pd.Timestamp("2026-10-14T14:58:37.482Z").timestamp()
+
+
+def test_grafana_local_clock_window_accounts_for_timezone_and_alignment(tmp_path):
+    path = tmp_path / "rpm.csv"
+    path.write_text(
+        "Time,RPM\n2026-10-14 15:39:25,0\n2026-10-14 15:39:30,0\n2026-10-14 15:39:35,0\n"
+    )
+    seconds, _, _ = read_rpm(path, timezone="Europe/Zurich")
+    assert seconds[0] == pd.Timestamp("2026-10-14T13:39:25Z").timestamp()
+    origin = source_origin("Job1_2026-10-14T14-58-37-482.csv", timezone="Europe/Zurich")
+    low, high, info = grafana_window(
+        "16:01:00",
+        "2026-10-14 16:09:30",
+        rpm_seconds=seconds,
+        origin=origin,
+        offset=30.5,
+        timestamps_have_timezone=True,
+    )
+    assert low == pytest.approx(3773.018)
+    assert high - low == 510
+    assert info["time_only_date"] == "2026-10-14"
+    explicit_low, _, _ = grafana_window(
+        "2026-10-14T14:01:00Z",
+        None,
+        rpm_seconds=seconds,
+        origin=origin,
+        offset=30.5,
+        timestamps_have_timezone=True,
+    )
+    assert explicit_low == low
+
+
+@pytest.mark.parametrize("start,end", [("bad", None), ("16:10", "16:00"), ("NaT", None)])
+def test_invalid_grafana_windows(start, end):
+    with pytest.raises(ValueError):
+        grafana_window(
+            start,
+            end,
+            rpm_seconds=[pd.Timestamp("2026-10-14T15:00Z").timestamp()],
+            origin=0,
+            offset=0,
+            timestamps_have_timezone=True,
+        )
+
+
+def test_clock_window_clips_whole_test_and_hold_samples(tmp_path):
+    fs = 128
+    t = np.arange(fs * 200) / fs
+    signal = np.sin(2 * np.pi * 20 * t)
+    signal[(t < 107) | (t >= 147)] += 100
+    source = tmp_path / "vibration.csv"
+    pd.DataFrame({"time_s": t, "accel": signal}).to_csv(source, index=False)
+    rt = np.arange(0, 200, 5)
+    speed = np.where((rt >= 20) & (rt < 155), 3000, 0)
+    origin = pd.Timestamp("2026-10-14T16:00:00Z")
+    rpm_path = tmp_path / "rpm.csv"
+    pd.DataFrame({"Time": origin + pd.to_timedelta(rt, unit="s"), "RPM": speed}).to_csv(
+        rpm_path, index=False
+    )
+    output = tmp_path / "cut"
+    assert (
+        main(
+            [
+                "analyze",
+                str(source),
+                "--rpm-csv",
+                str(rpm_path),
+                "--vibration-start",
+                str(origin),
+                "--rpm-alignment",
+                "Manual",
+                "--rpm-offset-seconds",
+                "7",
+                "--grafana-start",
+                "2026-10-14T16:01:40Z",
+                "--grafana-end",
+                "2026-10-14T16:02:20Z",
+                "--trim-start-seconds",
+                "2",
+                "--trim-end-seconds",
+                "2",
+                "--output",
+                str(output),
+                "--plots",
+                "time",
+                "--dpi",
+                "35",
+            ]
+        )
+        == 0
+    )
+    summaries = list(output.glob("test_*/**/summary.json"))
+    assert len(summaries) == 2
+    for file in summaries:
+        data = json.loads(file.read_text())
+        interval = data["analysis_interval"]
+        assert interval["retained_first_time_seconds"] >= 107
+        assert interval["retained_last_time_seconds"] < 147
+        assert data["raw_rms"] == pytest.approx(1 / np.sqrt(2))
+    alignment = json.loads((output / "alignment.json").read_text())
+    assert alignment["analysed_source_window_seconds"] == {"start": 107, "end_exclusive": 147}
 
 
 def test_batch_refuses_existing_results(tmp_path):
@@ -137,6 +239,7 @@ def test_batch_folder_structure_trim_and_comparison_exports(tmp_path, capsys):
     assert summary["analysis_interval"]["trim_start_seconds"] == 2
     assert summary["operating_context"]["mean_rpm"] > 0
     assert (test / "comparisons/01_accel/fft_rpm_waterfall.png").is_file()
+    assert (test / "comparisons/01_accel/fft_rpm_waterfall_2d.png").is_file()
     assert (test / "comparisons/01_accel/psd_comparison.png").is_file()
     data = np.load(test / "comparisons/01_accel/operating_point_spectra.npz")
     assert data["mean_window_peak_amplitude"].shape[0] == 2

@@ -24,6 +24,12 @@ def build_arguments(settings, plots):
         raise ValueError("Select at least one plot type.")
     if not settings["output"].strip():
         raise ValueError("Choose an output folder.")
+    if (
+        settings.get("grafana_start", "").strip() or settings.get("grafana_end", "").strip()
+    ) and not settings.get("rpm_csv", "").strip():
+        raise ValueError(
+            "Choose an RPM CSV to use the Grafana clock-time window, or clear the Grafana start/end fields."
+        )
     args = ["analyze", str(source), "--output", settings["output"], "--plots", *plots]
     mapping = {
         "time_column": "--time-column",
@@ -71,6 +77,9 @@ def build_arguments(settings, plots):
                 "rpm_stability_seconds": "--rpm-stability-seconds",
                 "rpm_slope_limit": "--rpm-slope-limit",
                 "rpm_scatter_limit": "--rpm-scatter-limit",
+                "grafana_start": "--grafana-start",
+                "grafana_end": "--grafana-end",
+                "grafana_timezone": "--grafana-timezone",
             }
         )
     for name, flag in mapping.items():
@@ -138,12 +147,14 @@ class App:
         spectrogram_tab = ttk.Frame(tabs, padding=12)
         interval_tab = ttk.Frame(tabs, padding=12)
         rpm_tab = ttk.Frame(tabs, padding=12)
+        clock_tab = ttk.Frame(tabs, padding=12)
         tabs.add(csv_tab, text="CSV settings")
         tabs.add(analysis_tab, text="Analysis settings")
         tabs.add(spectrogram_tab, text="Spectrogram")
         tabs.add(interval_tab, text="Interval & trim")
         tabs.add(rpm_tab, text="RPM detection")
-        for tab in (csv_tab, analysis_tab, spectrogram_tab, interval_tab, rpm_tab):
+        tabs.add(clock_tab, text="Grafana time window")
+        for tab in (csv_tab, analysis_tab, spectrogram_tab, interval_tab, rpm_tab, clock_tab):
             tab.columnconfigure(1, weight=1)
             tab.columnconfigure(3, weight=1)
         self.field(csv_tab, "Time column (blank = auto)", "time_column", "", 0)
@@ -222,6 +233,20 @@ class App:
         self.field(interval_tab, "Interval end [s] (blank = file end)", "end_seconds", "", 0, 2)
         self.field(interval_tab, "Trim from start [s]", "trim_start_seconds", "5", 1)
         self.field(interval_tab, "Trim from end [s]", "trim_end_seconds", "5", 1, 2)
+        self.field(clock_tab, "Grafana start (local time)", "grafana_start", "", 0)
+        self.field(clock_tab, "Grafana end (local time)", "grafana_end", "", 0, 2)
+        self.field(clock_tab, "Grafana display timezone", "grafana_timezone", "Europe/Zurich", 1)
+        ttk.Label(
+            clock_tab,
+            text=(
+                "Optional: enter YYYY-MM-DD HH:MM:SS (e.g. 2026-10-14 16:01:00), or HH:MM:SS "
+                "for the first date in the RPM export. Use the same local clock shown in Grafana. "
+                "Requires an RPM CSV; the estimated/manual alignment offset is applied automatically. "
+                "Blank bounds leave that side unrestricted. This window intersects any elapsed-time limits; "
+                "all exported test/point spectra and statistics use only samples inside it."
+            ),
+            wraplength=900,
+        ).grid(row=3, column=0, columnspan=4, sticky="w", pady=(12, 0))
         ttk.Label(
             interval_tab,
             text=(
@@ -587,6 +612,8 @@ class App:
             "trim_end_seconds": "0",
             "rpm_csv": "",
             "channel_mode": "Auto activity",
+            "grafana_start": "",
+            "grafana_end": "",
         }.items():
             self.variables[key].set(value)
         self.launch(
