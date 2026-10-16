@@ -256,3 +256,33 @@ def test_cli_trim_controls_statistics_and_source_time_exports(tmp_path):
     spectra = np.load(output / "01_signal/time_frequency.npz")
     assert spectra["time_s"][0] == pytest.approx(1.25)
     assert spectra["spectrogram_time_s"][0] == pytest.approx(1.05)
+
+
+def test_microsecond_rounding_at_high_sample_rate(tmp_path):
+    fs = 17066.6666666667
+    time = np.round(np.arange(100000) / fs, 6)
+    path = tmp_path / "high_rate.csv"
+    pd.DataFrame({"time_s": time, "accel": np.sin(2 * np.pi * 100 * time)}).to_csv(
+        path, index=False
+    )
+    rec = read_csv(path)
+    assert rec.timing_jitter > 0.01
+    assert rec.sample_rate == pytest.approx(fs, rel=1e-6)
+    assert len(rec.time) == len(time)
+    np.testing.assert_array_equal(rec.time, time)
+    # A lost sample must not be explained away as decimal rounding.
+    pd.DataFrame({"time_s": np.delete(time, 50000), "accel": np.ones(len(time) - 1)}).to_csv(
+        path, index=False
+    )
+    with pytest.raises(ValueError, match="Uneven"):
+        read_csv(path)
+
+
+def test_rounded_timestamps_with_clock_drift_still_fail(tmp_path):
+    fs = 17066.6666666667
+    time = np.arange(100000) / fs
+    time = np.round(time + 0.0001 * np.sin(np.arange(len(time)) / 1000), 6)
+    path = tmp_path / "drift.csv"
+    pd.DataFrame({"time_s": time, "accel": np.ones(len(time))}).to_csv(path, index=False)
+    with pytest.raises(ValueError, match="Uneven"):
+        read_csv(path)

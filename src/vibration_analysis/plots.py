@@ -7,6 +7,22 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
+def spectrogram_color_limits(density, range_db=60, headroom_db=6, lower_db=None, upper_db=None):
+    """Display limits in dB re 1 signal-unit squared/Hz; never alter PSD values."""
+    if not np.isfinite(range_db) or not 0 < range_db <= 200:
+        raise ValueError("Spectrogram color range must be between 0 and 200 dB.")
+    if not np.isfinite(headroom_db) or headroom_db < 0:
+        raise ValueError("Spectrogram headroom must be finite and nonnegative.")
+    peak = float(np.max(density))
+    upper = (
+        10 * np.log10(peak if peak > 0 else 1e-20) + headroom_db if upper_db is None else upper_db
+    )
+    lower = upper - range_db if lower_db is None else lower_db
+    if not np.isfinite(lower) or not np.isfinite(upper) or lower >= upper:
+        raise ValueError("Spectrogram limits must be finite, with lower dB < upper dB.")
+    return float(lower), float(upper)
+
+
 def save_plots(
     result,
     time,
@@ -23,6 +39,10 @@ def save_plots(
     spectrogram_colormap="viridis",
     spectrogram_interpolation="bilinear",
     waterfall_max_frames=60,
+    spectrogram_headroom_db=6,
+    spectrogram_lower_db=None,
+    spectrogram_upper_db=None,
+    rpm_points=None,
 ):
     plt.rcParams.update(
         {
@@ -99,11 +119,43 @@ def save_plots(
         spec_frequency = result.spectrogram_frequency[spec_selected]
         density = result.spectrogram_psd[:, spec_selected].T
         density_db = 10 * np.log10(np.maximum(density, np.finfo(float).tiny))
-        peak_density = float(density.max())
-        maximum_db = 10 * np.log10(peak_density if peak_density > 0 else 1e-20)
+        lower_db, upper_db = spectrogram_color_limits(
+            density,
+            spectrogram_range_db,
+            spectrogram_headroom_db,
+            spectrogram_lower_db,
+            spectrogram_upper_db,
+        )
         hop = result.summary["spectrogram_hop_seconds"]
         df = result.summary["spectrogram_bin_width_hz"]
-        fig, ax = plt.subplots(figsize=(11, 5), layout="constrained")
+        if rpm_points:
+            fig = plt.figure(figsize=(11, 6.5), layout="constrained")
+            grid = fig.add_gridspec(2, 2, height_ratios=[5, 1], width_ratios=[1, 0.035])
+            ax = fig.add_subplot(grid[0, 0])
+            rpm_ax = fig.add_subplot(grid[1, 0], sharex=ax)
+            color_ax = fig.add_subplot(grid[0, 1])
+            for point in rpm_points:
+                start, stop = point["start_seconds"], point["end_seconds"]
+                rpm_ax.axvspan(start, stop, ymin=0.6, ymax=0.95, color="#dbeafe")
+                rpm_ax.plot([start, stop], [0.8, 0.8], color="#475569", lw=1.5)
+                rpm_ax.text(
+                    (start + stop) / 2,
+                    0.5,
+                    f"{point['mean_rpm']:.0f} RPM",
+                    ha="right",
+                    va="top",
+                    rotation=35,
+                    fontsize=9,
+                )
+            rpm_ax.set(
+                ylim=(-0.9, 1), yticks=[], ylabel="Mean RPM", xlabel="Source CSV elapsed time [s]"
+            )
+            rpm_ax.grid(False)
+            rpm_ax.spines["left"].set_visible(False)
+            ax.tick_params(labelbottom=False)
+        else:
+            fig, ax = plt.subplots(figsize=(11, 5), layout="constrained")
+            color_ax = None
         mesh = ax.imshow(
             density_db,
             origin="lower",
@@ -117,12 +169,12 @@ def save_plots(
             interpolation=spectrogram_interpolation,
             interpolation_stage="data",
             cmap=spectrogram_colormap,
-            vmin=maximum_db - spectrogram_range_db,
-            vmax=maximum_db,
+            vmin=lower_db,
+            vmax=upper_db,
         )
         ax.grid(False)
         ax.set(
-            xlabel="Window center [s]",
+            xlabel="" if rpm_points else "Source CSV elapsed time [s]",
             ylabel="Frequency [Hz]",
             ylim=(fmin, fmax),
             title=(
@@ -131,7 +183,10 @@ def save_plots(
                 f"Hop {hop * 1000:.3g} ms | Bin spacing {df:.3g} Hz"
             ),
         )
-        fig.colorbar(mesh, ax=ax, label=f"PSD [dB re 1 ({unit})²/Hz]")
+        ax.set_xlim(result.spectrogram_time[0] - hop / 2, result.spectrogram_time[-1] + hop / 2)
+        below, above = bool(np.any(density_db < lower_db)), bool(np.any(density_db > upper_db))
+        extend = "both" if below and above else "min" if below else "max" if above else "neither"
+        fig.colorbar(mesh, ax=ax, cax=color_ax, extend=extend, label=f"PSD [dB re 1 ({unit})^2/Hz]")
         save(fig, "spectrogram")
     if "waterfall" in plots:
         fig = plt.figure(figsize=(11, 6), layout="constrained")

@@ -100,6 +100,35 @@ def select_interval(
     return selected, metadata
 
 
+def _timestamps_match_rounded_grid(time):
+    """Accept decimal export rounding only when the entire clock follows one grid.
+
+    Check in blocks to avoid another recording-sized allocation. Missing samples
+    or drifting clocks must still fail, even if individual steps look plausible.
+    """
+    spacing = (time[-1] - time[0]) / (len(time) - 1)
+    probe = time[:4096]
+    quantum = None
+    epsilon = max(1e-12, float(np.max(np.abs(time[[0, -1]]))) * np.finfo(float).eps * 8)
+    for decimals in range(13):
+        candidate = 10.0**-decimals
+        if candidate >= spacing / 10 or candidate <= epsilon * 4:
+            continue
+        if np.max(np.abs(probe - np.rint(probe / candidate) * candidate)) <= epsilon:
+            quantum = candidate
+            break
+    if quantum is None:
+        return False
+    for first in range(0, len(time), 250000):
+        block = time[first : first + 250000]
+        if np.max(np.abs(block - np.rint(block / quantum) * quantum)) > epsilon:
+            return False
+        expected = time[0] + np.arange(first, first + len(block)) * spacing
+        if np.max(np.abs(block - expected)) > quantum + epsilon:
+            return False
+    return True
+
+
 def read_csv(
     path: str | Path,
     *,
@@ -141,7 +170,8 @@ def read_csv(
     frame = pd.read_csv(
         path,
         sep=delimiter,
-        engine="python",
+        engine="c",
+        float_precision="round_trip",
         decimal=decimal,
         skiprows=skiprows,
         header=0 if header else None,
@@ -183,7 +213,7 @@ def read_csv(
             raise ValueError("Timestamps must be finite, strictly increasing and unique.")
         interval = float(np.median(intervals))
         jitter = float(np.max(np.abs(intervals - interval)) / interval)
-        if jitter > jitter_tolerance:
+        if jitter > jitter_tolerance and not _timestamps_match_rounded_grid(time):
             raise ValueError(
                 f"Uneven sampling ({jitter:.2%} maximum interval deviation). "
                 "Check dropped samples/time units or resample explicitly before analysis."

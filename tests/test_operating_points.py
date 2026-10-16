@@ -34,6 +34,31 @@ def test_filename_origin():
     assert value == pd.Timestamp("2026-10-14T14:58:37.482Z").timestamp()
 
 
+def test_rpm_identical_duplicate_last_row_is_removed(tmp_path):
+    path = tmp_path / "rpm.csv"
+    path.write_text(
+        "Time,RPM\n2026-10-14 17:16:22,0\n2026-10-14 17:16:24,0\n2026-10-14 17:16:26,0\n2026-10-14 17:16:26,0\n"
+    )
+    time, rpm, info = read_rpm(path)
+    np.testing.assert_allclose(np.diff(time), 2)
+    assert len(rpm) == 3
+    assert info["identical_duplicates_removed"] == 1
+
+
+@pytest.mark.parametrize(
+    "rows,error",
+    [
+        ("2026-10-14 17:16:22,0\n2026-10-14 17:16:24,0\n2026-10-14 17:16:24,3000\n", "Conflicting"),
+        ("2026-10-14 17:16:24,0\n2026-10-14 17:16:22,0\n2026-10-14 17:16:26,0\n", "backward"),
+    ],
+)
+def test_rpm_conflicting_or_backward_timestamps_rejected(tmp_path, rows, error):
+    path = tmp_path / "rpm.csv"
+    path.write_text("Time,RPM\n" + rows)
+    with pytest.raises(ValueError, match=error):
+        read_rpm(path)
+
+
 def test_grafana_local_clock_window_accounts_for_timezone_and_alignment(tmp_path):
     path = tmp_path / "rpm.csv"
     path.write_text(
@@ -91,6 +116,16 @@ def test_clock_window_clips_whole_test_and_hold_samples(tmp_path):
     pd.DataFrame({"Time": origin + pd.to_timedelta(rt, unit="s"), "RPM": speed}).to_csv(
         rpm_path, index=False
     )
+    electrical_path = tmp_path / "voltage.csv"
+    pd.DataFrame(
+        {"Time": origin + pd.to_timedelta(rt, unit="s"), "voltage": np.full(len(rt), 50)}
+    ).to_csv(electrical_path, index=False)
+    raw_path = tmp_path / "raw_rpm.csv"
+    # Deliberately no stable holds in raw RPM: detection must still use mRPM above.
+    raw_speed = 6000 + 500 * np.sin(rt)
+    pd.DataFrame({"Time": origin + pd.to_timedelta(rt, unit="s"), "val_rpm": raw_speed}).to_csv(
+        raw_path, index=False
+    )
     output = tmp_path / "cut"
     assert (
         main(
@@ -105,6 +140,10 @@ def test_clock_window_clips_whole_test_and_hold_samples(tmp_path):
                 "Manual",
                 "--rpm-offset-seconds",
                 "7",
+                "--raw-rpm-csv",
+                str(raw_path),
+                "--electrical-csv",
+                str(electrical_path),
                 "--grafana-start",
                 "2026-10-14T16:01:40Z",
                 "--grafana-end",
@@ -125,6 +164,18 @@ def test_clock_window_clips_whole_test_and_hold_samples(tmp_path):
     )
     summaries = list(output.glob("test_*/**/summary.json"))
     assert len(summaries) == 2
+    metadata = json.loads((output / "operating_conditions.json").read_text())
+    assert len(metadata["traces"]) == 2
+    assert metadata["traces"][0]["source"] == str(raw_path.resolve())
+    raw_export = pd.read_csv(output / "operating_conditions_rpm.csv")
+    expected = raw_speed[(rt >= 100) & (rt < 140)]
+    np.testing.assert_allclose(raw_export["value"], expected)
+    hold = next(output.glob("test_*/operating_points/point_*/01_accel/summary.json"))
+    assert json.loads(hold.read_text())["operating_context"]["mean_rpm"] == 3000
+    native = pd.read_csv(output / "operating_conditions_electrical.csv")
+    dates = pd.to_datetime(native["timestamp"], utc=True)
+    assert dates.min() >= pd.Timestamp("2026-10-14T16:01:40Z")
+    assert dates.max() < pd.Timestamp("2026-10-14T16:02:20Z")
     for file in summaries:
         data = json.loads(file.read_text())
         interval = data["analysis_interval"]
@@ -224,8 +275,11 @@ def test_batch_folder_structure_trim_and_comparison_exports(tmp_path, capsys):
                 "--plots",
                 "fft",
                 "psd",
+                "spectrogram",
                 "--dpi",
                 "35",
+                "--waterfall2d-fmax",
+                "40",
                 "--gui-progress",
             ]
         )
@@ -233,6 +287,14 @@ def test_batch_folder_structure_trim_and_comparison_exports(tmp_path, capsys):
     )
     test = output / "test_01"
     assert (test / "whole_test/01_accel/fft.png").is_file()
+    assert (test / "whole_test/01_accel/spectrogram.png").is_file()
+    metadata = json.loads((test / "whole_test/01_accel/summary.json").read_text())
+    assert metadata["spectrogram_display"]["rpm_panel"]
+    labels = metadata["spectrogram_display"]["operating_points"]
+    assert len(labels) == 2
+    assert labels[0]["mean_rpm"] == 2000
+    assert labels[1]["mean_rpm"] == 3000
+    assert labels[0]["end_seconds"] < labels[1]["start_seconds"]
     holds = list((test / "operating_points").iterdir())
     assert len(holds) == 2
     summary = json.loads((holds[0] / "01_accel/summary.json").read_text())
@@ -240,6 +302,13 @@ def test_batch_folder_structure_trim_and_comparison_exports(tmp_path, capsys):
     assert summary["operating_context"]["mean_rpm"] > 0
     assert (test / "comparisons/01_accel/fft_rpm_waterfall.png").is_file()
     assert (test / "comparisons/01_accel/fft_rpm_waterfall_2d.png").is_file()
+    assert (test / "comparisons/01_accel/fft_rpm_waterfall_2d_broadband.png").is_file()
+    limits = json.loads((test / "comparisons/01_accel/waterfall_2d_display.json").read_text())
+    assert limits["broadband_hz"] == [0, 64]
+    assert limits["selected_hz"] == [0, 40]
+    # The detection mRPM CSV must never implicitly populate the simple raw RPM plot.
+    assert not (test / "operating_conditions.png").exists()
+    assert not (output / "operating_conditions.png").exists()
     assert (test / "comparisons/01_accel/psd_comparison.png").is_file()
     data = np.load(test / "comparisons/01_accel/operating_point_spectra.npz")
     assert data["mean_window_peak_amplitude"].shape[0] == 2

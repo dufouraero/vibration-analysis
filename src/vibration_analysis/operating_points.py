@@ -37,8 +37,22 @@ def read_rpm(path, time_column=None, value_column=None, timezone=None):
         raise ValueError(
             "RPM log needs at least three finite, non-negative values and valid times."
         )
-    if np.any(np.diff(seconds) <= 0):
-        raise ValueError("RPM timestamps must be unique and strictly increasing.")
+    steps = np.diff(seconds)
+    if np.any(steps < 0):
+        raise ValueError("RPM timestamps go backward; export the RPM log in increasing time order.")
+    duplicates = steps == 0
+    if np.any(rpm[1:][duplicates] != rpm[:-1][duplicates]):
+        raise ValueError(
+            "Conflicting RPM values share the same timestamp. Export with sufficient timestamp precision or resolve the conflicting rows."
+        )
+    removed_duplicates = int(duplicates.sum())
+    if removed_duplicates:
+        keep = np.r_[True, ~duplicates]
+        seconds, rpm = seconds[keep], rpm[keep]
+    if len(rpm) < 3:
+        raise ValueError(
+            "RPM log needs at least three distinct timestamps after removing identical duplicates."
+        )
     return (
         seconds,
         rpm,
@@ -48,6 +62,7 @@ def read_rpm(path, time_column=None, value_column=None, timezone=None):
             "median_interval_seconds": float(np.median(np.diff(seconds))),
             "timestamps_have_timezone": explicit_zone,
             "naive_timestamp_timezone": timezone or "UTC (nominal clock)",
+            "identical_duplicates_removed": removed_duplicates,
         },
     )
 

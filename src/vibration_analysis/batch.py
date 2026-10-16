@@ -113,33 +113,70 @@ def _comparisons(args, root, points, unit):
             ax.view_init(elev=28, azim=-65)
             fig.savefig(directory / "fft_rpm_waterfall.png", dpi=args.dpi, bbox_inches="tight")
             plt.close(fig)
-            fig, rows = plt.subplots(
-                len(means),
-                1,
-                sharex=True,
-                sharey=True,
-                squeeze=False,
-                figsize=(12, max(3.5, 1.65 * len(means) + 1.2)),
-                layout="constrained",
-            )
-            maximum = max(float(amplitude[:, selected].max()) * 1.08, 1e-12)
-            for i, (axis, spectrum) in enumerate(zip(rows[:, 0], amplitude)):
-                color = f"C{i % 10}"
-                axis.plot(frequency[selected], spectrum[selected], lw=0.9, color=color)
-                axis.fill_between(frequency[selected], spectrum[selected], alpha=0.08, color=color)
-                axis.set(ylim=(0, maximum), xlim=(args.fmin, args.fmax or frequency[-1]))
-                axis.set_ylabel(
-                    f"{i + 1}: {means[i]:.0f} RPM", rotation=0, ha="right", va="center", labelpad=14
+            zoom_max = args.waterfall2d_fmax if args.waterfall2d_fmax is not None else args.fmax
+            zoom_max = frequency[-1] if zoom_max is None else zoom_max
+            if (
+                not np.isfinite(zoom_max)
+                or not args.fmin < zoom_max <= reports[0]["summary"]["nyquist_hz"]
+            ):
+                raise ValueError(
+                    "2D waterfall max frequency must exceed plot minimum and be at or below Nyquist."
                 )
-                axis.grid(alpha=0.2)
-            rows[-1, 0].set_xlabel("Frequency [Hz]")
-            fig.supylabel(f"Mean window FFT peak amplitude [{unit}]")
-            fig.suptitle(
-                f"{reports[0]['channel']} | 2D FFT waterfall by operating point\n"
-                f"{args.segment_seconds:g} s {args.window} windows · same amplitude scale in every row · unfiltered"
+            _json(
+                directory / "waterfall_2d_display.json",
+                {
+                    "broadband_hz": [0, reports[0]["summary"]["nyquist_hz"]],
+                    "selected_hz": [args.fmin, zoom_max],
+                    "amplitude_scaling": "shared across operating points within each image",
+                },
             )
-            fig.savefig(directory / "fft_rpm_waterfall_2d.png", dpi=args.dpi, bbox_inches="tight")
-            plt.close(fig)
+            for filename, view_min, view_max, view_label in (
+                (
+                    "fft_rpm_waterfall_2d_broadband.png",
+                    0,
+                    reports[0]["summary"]["nyquist_hz"],
+                    "broadband",
+                ),
+                ("fft_rpm_waterfall_2d.png", args.fmin, zoom_max, "selected frequency range"),
+            ):
+                view_selected = (frequency >= view_min) & (frequency <= view_max)
+                if not np.any(view_selected):
+                    raise ValueError("2D waterfall frequency range contains no FFT bins.")
+                fig, rows = plt.subplots(
+                    len(means),
+                    1,
+                    sharex=True,
+                    sharey=True,
+                    squeeze=False,
+                    figsize=(12, max(3.5, 1.65 * len(means) + 1.2)),
+                    layout="constrained",
+                )
+                maximum = max(float(amplitude[:, view_selected].max()) * 1.08, 1e-12)
+                for i, (axis, spectrum) in enumerate(zip(rows[:, 0], amplitude)):
+                    color = f"C{i % 10}"
+                    axis.plot(
+                        frequency[view_selected], spectrum[view_selected], lw=0.9, color=color
+                    )
+                    axis.fill_between(
+                        frequency[view_selected], spectrum[view_selected], alpha=0.08, color=color
+                    )
+                    axis.set(ylim=(0, maximum), xlim=(view_min, view_max))
+                    axis.set_ylabel(
+                        f"{i + 1}: {means[i]:.0f} RPM",
+                        rotation=0,
+                        ha="right",
+                        va="center",
+                        labelpad=14,
+                    )
+                    axis.grid(alpha=0.2)
+                rows[-1, 0].set_xlabel("Frequency [Hz]")
+                fig.supylabel(f"Mean window FFT peak amplitude [{unit}]")
+                fig.suptitle(
+                    f"{reports[0]['channel']} | 2D FFT waterfall by operating point | {view_label}\n"
+                    f"{args.segment_seconds:g} s {args.window} windows · same amplitude scale in every row · unfiltered"
+                )
+                fig.savefig(directory / filename, dpi=args.dpi, bbox_inches="tight")
+                plt.close(fig)
         if any(p in args.plots for p in ("all", "psd")):
             fig, ax = plt.subplots(figsize=(11, 5), layout="constrained")
             for i, density in enumerate(psd):
@@ -178,7 +215,12 @@ def run_rpm_analysis(args, recording, bands):
     rpm_seconds, rpm, columns = read_rpm(
         args.rpm_csv, args.rpm_time_column, args.rpm_column, timezone=args.grafana_timezone
     )
-    emit(args, "Aligning RPM and vibration timelines…")
+    if columns["identical_duplicates_removed"]:
+        emit(
+            args,
+            f"mRPM import: removed {columns['identical_duplicates_removed']} identical duplicate row(s).",
+        )
+    emit(args, "Aligning mRPM and vibration timelines…")
     origin = source_origin(args.input, args.vibration_start, timezone=args.grafana_timezone)
     if args.rpm_alignment == "Auto":
         offset, alignment = estimate_offset(recording, rpm_seconds, rpm, origin, args.running_rpm)
@@ -194,6 +236,7 @@ def run_rpm_analysis(args, recording, bands):
     alignment.update(
         {
             "rpm_csv": str(args.rpm_csv.resolve()),
+            "detection_source": "mRPM CSV; independent of optional raw RPM plot source",
             "rpm_columns": columns,
             "vibration_origin_timestamp_epoch_s": origin,
             "offset_seconds_added_to_rpm_elapsed": offset,
@@ -271,18 +314,53 @@ def run_rpm_analysis(args, recording, bands):
         },
     )
     _overview(args, recording, time, rpm, runs, bounds=(low, high))
+    from .telemetry import save_operating_conditions
+
+    traces = [getattr(args, "raw_rpm_trace", None), getattr(args, "electrical_trace", None)]
+    if any(trace is not None for trace in traces):
+        emit(args, "Saving operating-condition time plots…")
+    save_operating_conditions(
+        args.output,
+        traces,
+        timezone=args.grafana_timezone,
+        bounds=(origin + low - offset, origin + high - offset),
+        dpi=args.dpi,
+    )
     test_rows = []
     for index, run in enumerate(runs, 1):
         test_label = f"Test {index}/{len(runs)}"
         emit(args, f"{test_label} — generating whole-test plots.")
         start, stop = max(low, run["start"]), min(high, run["end"])
         test_root = args.output / f"test_{index:02d}"
+        save_operating_conditions(
+            test_root,
+            traces,
+            timezone=args.grafana_timezone,
+            bounds=(origin + start - offset, origin + stop - offset),
+            dpi=args.dpi,
+        )
         whole, interval = select_interval(recording, start_seconds=start, end_seconds=stop)
         context = {
             "test": index,
             "scope": "detected test within selected time window; transitions retained where included",
             "alignment": alignment,
         }
+        rpm_points = []
+        for hold in run["holds"]:
+            a = max(start, hold["start"]) + args.trim_start_seconds
+            b = min(stop, hold["end"]) - args.trim_end_seconds
+            inside = (time >= a) & (time < b)
+            if (
+                b - a >= max(args.segment_seconds * 2, 4 / recording.sample_rate)
+                and inside.sum() >= 2
+            ):
+                rpm_points.append(
+                    {
+                        "start_seconds": float(a),
+                        "end_seconds": float(b),
+                        "mean_rpm": float(rpm[inside].mean()),
+                    }
+                )
         export_recording(
             Namespace(
                 **{
@@ -295,6 +373,7 @@ def run_rpm_analysis(args, recording, bands):
             interval,
             bands,
             context,
+            rpm_points=rpm_points,
         )
         points, point_rows = [], []
         for candidate_index, hold in enumerate(run["holds"], 1):
@@ -352,6 +431,13 @@ def run_rpm_analysis(args, recording, bands):
                 interval,
                 bands,
                 {"test": index, **row, "alignment": alignment},
+                rpm_points=[
+                    {
+                        "start_seconds": float(retained_a),
+                        "end_seconds": float(retained_b),
+                        "mean_rpm": row["mean_rpm"],
+                    }
+                ],
             )
             points.append({"reports": reports, "metadata": row})
             point_rows.append(row)

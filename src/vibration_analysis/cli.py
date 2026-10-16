@@ -5,6 +5,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 import pandas as pd
@@ -28,7 +29,33 @@ def parser():
     run.add_argument("--gui-progress", action="store_true", help=argparse.SUPPRESS)
     run.add_argument("--output", type=Path, default=Path("results"))
     run.add_argument(
-        "--rpm-csv", type=Path, help="Optional RPM log: auto-detect tests and settled holds."
+        "--mrpm-csv",
+        "--rpm-csv",
+        dest="rpm_csv",
+        type=Path,
+        help="mRPM log for alignment, test/hold detection and operating-point means (legacy --rpm-csv also supported).",
+    )
+    run.add_argument(
+        "--electrical-csv",
+        type=Path,
+        help="Optional Grafana voltage/current CSV for the operating-condition time plot.",
+    )
+    run.add_argument(
+        "--raw-rpm-csv",
+        type=Path,
+        help="Optional raw RPM log for operating-condition time plot ONLY; never used for detection or alignment.",
+    )
+    run.add_argument("--raw-rpm-time-column")
+    run.add_argument("--raw-rpm-column")
+    run.add_argument("--electrical-time-column")
+    run.add_argument("--electrical-column")
+    run.add_argument(
+        "--electrical-quantity", choices=["auto", "voltage", "current"], default="auto"
+    )
+    run.add_argument(
+        "--waterfall2d-fmax",
+        type=float,
+        help="Maximum frequency of the selected-range 2D RPM waterfall; blank uses plot maximum. A broadband version is always saved too.",
     )
     run.add_argument("--rpm-time-column")
     run.add_argument(
@@ -181,6 +208,25 @@ def parser():
     run.add_argument(
         "--spectrogram-interpolation", choices=["bilinear", "nearest"], default="bilinear"
     )
+    run.add_argument(
+        "--spectrogram-headroom-db",
+        type=float,
+        default=6,
+        help="Automatic upper limit above peak PSD (default 6 dB).",
+    )
+    run.add_argument(
+        "--spectrogram-lower-db", type=float, help="Fixed lower PSD color limit, dB re 1 unit²/Hz."
+    )
+    run.add_argument(
+        "--spectrogram-upper-db",
+        type=float,
+        help="Fixed upper PSD color limit; blank uses peak plus headroom.",
+    )
+    run.add_argument(
+        "--no-spectrogram-rpm",
+        action="store_true",
+        help="Hide the mean RPM operating-point labels.",
+    )
     return root
 
 
@@ -215,8 +261,52 @@ def make_demo(args):
 def run_analysis(args):
     if (args.grafana_start or args.grafana_end) and args.rpm_csv is None:
         raise ValueError(
-            "A Grafana clock-time window requires an RPM CSV for alignment. Otherwise use elapsed interval limits."
+            "A Grafana clock-time window requires an mRPM CSV for alignment. Otherwise use elapsed interval limits."
         )
+    args.raw_rpm_trace = None
+    if args.raw_rpm_csv is not None:
+        from .operating_points import read_rpm
+        from .telemetry import Trace
+
+        seconds, values, columns = read_rpm(
+            args.raw_rpm_csv,
+            args.raw_rpm_time_column,
+            args.raw_rpm_column,
+            timezone=args.grafana_timezone,
+        )
+        args.raw_rpm_trace = Trace(
+            seconds,
+            values,
+            "Engine speed [RPM]",
+            str(args.raw_rpm_csv.resolve()),
+            columns["value_column"],
+        )
+        emit(args, "Raw RPM CSV loaded for the operating-condition time plot only.")
+    args.electrical_trace = None
+    if args.electrical_csv is not None:
+        from .telemetry import read_electrical
+
+        args.electrical_trace = read_electrical(
+            args.electrical_csv,
+            timezone=args.grafana_timezone,
+            time_column=args.electrical_time_column,
+            value_column=args.electrical_column,
+            quantity=args.electrical_quantity,
+        )
+        emit(
+            args, f"Electrical CSV: {args.electrical_trace.label} ({args.electrical_trace.column})."
+        )
+    if args.electrical_trace is not None:
+        repeated = int(np.sum(np.diff(args.electrical_trace.seconds) == 0))
+        if repeated:
+            emit(
+                args,
+                f"Electrical import: retained {repeated} additional reading(s) sharing exported timestamps; no averaging.",
+            )
+    if args.waterfall2d_fmax is not None and (
+        not np.isfinite(args.waterfall2d_fmax) or args.waterfall2d_fmax <= args.fmin
+    ):
+        raise ValueError("2D waterfall max frequency must be finite and greater than plot minimum.")
     emit(args, "Reading the vibration CSV…")
     bands = []
     for band in args.band:
@@ -224,6 +314,7 @@ def run_analysis(args):
         if len(pair) != 2:
             raise ValueError("Bands must be LOW:HIGH, for example 100:500.")
         bands.append(tuple(map(float, pair)))
+    read_started = perf_counter()
     recording = read_csv(
         args.input,
         time_column=args.time_column,
@@ -237,6 +328,15 @@ def run_analysis(args):
         jitter_tolerance=args.timing_tolerance,
         scale=args.scale,
     )
+    emit(
+        args,
+        f"CSV loaded: {len(recording.time):,} samples, "
+        f"{len(recording.channels)} channel(s), in {perf_counter() - read_started:.1f} s.",
+    )
+    if args.waterfall2d_fmax is not None and args.waterfall2d_fmax > recording.sample_rate / 2 * (
+        1 + 1e-10
+    ):
+        raise ValueError("2D waterfall max frequency must be at or below Nyquist.")
     available_count = len(recording.channels)
     args.channel_selection_report = None
     if args.active_channels and args.channels is None:
@@ -265,13 +365,43 @@ def run_analysis(args):
         trim_start_seconds=args.trim_start_seconds,
         trim_end_seconds=args.trim_end_seconds,
     )
+    if args.raw_rpm_trace is not None or args.electrical_trace is not None:
+        from .operating_points import source_origin
+        from .telemetry import save_operating_conditions
+
+        try:
+            origin = source_origin(args.input, args.vibration_start, timezone=args.grafana_timezone)
+        except ValueError:
+            if args.vibration_start:
+                raise
+            origin = None
+        bounds = (
+            None
+            if origin is None
+            else (
+                origin + interval["retained_first_time_seconds"],
+                origin + interval["retained_last_time_seconds"] + 1 / recording.sample_rate,
+            )
+        )
+        if origin is None:
+            emit(
+                args,
+                "Operating-condition plot uses the full optional logs: no vibration start timestamp is available for clipping.",
+            )
+        save_operating_conditions(
+            args.output,
+            [args.raw_rpm_trace, args.electrical_trace],
+            timezone=args.grafana_timezone,
+            bounds=bounds,
+            dpi=args.dpi,
+        )
     emit(args, "Generating plots and numerical results…")
     reports = export_recording(args, recording, interval, bands)
     emit(args, "Complete — results are ready.", complete=True)
     return reports
 
 
-def export_recording(args, recording, interval, bands, context=None):
+def export_recording(args, recording, interval, bands, context=None, rpm_points=None):
     print(
         f"Retained CSV interval: {interval['retained_first_time_seconds']:.6g}–"
         f"{interval['retained_last_time_seconds']:.6g} s "
@@ -290,6 +420,15 @@ def export_recording(args, recording, interval, bands, context=None):
         raise ValueError("Waterfall maximum frames must be 0 (all) or a positive integer.")
     if not np.isfinite(args.spectrogram_range_db) or not 0 < args.spectrogram_range_db <= 200:
         raise ValueError("Spectrogram color range must be between 0 and 200 dB.")
+    from .plots import spectrogram_color_limits
+
+    spectrogram_color_limits(
+        np.array([1.0]),
+        args.spectrogram_range_db,
+        args.spectrogram_headroom_db,
+        args.spectrogram_lower_db,
+        args.spectrogram_upper_db,
+    )
     plots = set(args.plots)
     if "all" in plots:
         plots = {"time", "fft", "psd", "waterfall", "spectrogram"}
@@ -390,6 +529,26 @@ def export_recording(args, recording, interval, bands, context=None):
             },
             "spectrogram_display": {
                 "range_db": args.spectrogram_range_db,
+                "headroom_db": args.spectrogram_headroom_db,
+                "requested_lower_db": args.spectrogram_lower_db,
+                "requested_upper_db": args.spectrogram_upper_db,
+                "operating_points": rpm_points,
+                "rpm_panel": bool(
+                    rpm_points and not args.no_spectrogram_rpm and "spectrogram" in plots
+                ),
+                "limits_db": spectrogram_color_limits(
+                    result.spectrogram_psd[
+                        :,
+                        (result.spectrogram_frequency >= args.fmin)
+                        & (result.spectrogram_frequency <= fmax),
+                    ],
+                    args.spectrogram_range_db,
+                    args.spectrogram_headroom_db,
+                    args.spectrogram_lower_db,
+                    args.spectrogram_upper_db,
+                )
+                if "spectrogram" in plots
+                else None,
                 "colormap": args.spectrogram_colormap,
                 "interpolation": args.spectrogram_interpolation,
             },
@@ -414,6 +573,10 @@ def export_recording(args, recording, interval, bands, context=None):
             spectrogram_colormap=args.spectrogram_colormap,
             spectrogram_interpolation=args.spectrogram_interpolation,
             waterfall_max_frames=args.waterfall_max_frames,
+            spectrogram_headroom_db=args.spectrogram_headroom_db,
+            spectrogram_lower_db=args.spectrogram_lower_db,
+            spectrogram_upper_db=args.spectrogram_upper_db,
+            rpm_points=None if args.no_spectrogram_rpm else rpm_points,
         )
         print(
             f"{name}: raw RMS={summary['raw_rms']:.5g}, Welch RMS={summary['welch_rms']:.5g} "

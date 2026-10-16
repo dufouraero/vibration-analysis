@@ -22,6 +22,10 @@ def test_form_maps_to_cli_without_shell(tmp_path):
         "spectrogram_seconds": "0.1",
         "spectrogram_overlap": "0.8",
         "spectrogram_range_db": "60",
+        "spectrogram_headroom_db": "8",
+        "spectrogram_lower_db": "-50",
+        "spectrogram_upper_db": "10",
+        "spectrogram_rpm": "0",
         "spectrogram_colormap": "viridis",
         "spectrogram_interpolation": "bilinear",
         "waterfall_max_frames": "0",
@@ -40,6 +44,9 @@ def test_form_maps_to_cli_without_shell(tmp_path):
     assert args.no_header
     assert args.scale == 9.80665
     assert args.psd_highpass_hz == 10
+    assert args.spectrogram_headroom_db == 8
+    assert args.spectrogram_lower_db == -50 and args.spectrogram_upper_db == 10
+    assert args.no_spectrogram_rpm
     assert args.spectrogram_seconds == 0.1
     assert args.spectrogram_interpolation == "bilinear"
     assert args.waterfall_max_frames == 0
@@ -112,3 +119,51 @@ def test_grafana_window_form_and_missing_rpm_validation(tmp_path):
     assert args.grafana_start == "16:01:00"
     assert args.grafana_end == "16:09:30"
     assert args.grafana_timezone == "Europe/Zurich"
+
+
+def test_optional_electrical_csv_and_waterfall_limit(tmp_path):
+    source = tmp_path / "sensor.csv"
+    source.touch()
+    electrical = tmp_path / "voltage.csv"
+    electrical.touch()
+    args = parser().parse_args(
+        build_arguments(
+            {
+                "input": str(source),
+                "output": str(tmp_path / "results"),
+                "electrical_csv": str(electrical),
+                "electrical_column": "Voltage [V]",
+                "electrical_quantity": "voltage",
+                "waterfall2d_fmax": "500",
+                "fmax": "2000",
+                "vibration_start": "2026-10-15 15:00:00",
+            },
+            ["waterfall"],
+        )
+    )
+    assert args.electrical_csv == electrical
+    assert args.electrical_column == "Voltage [V]"
+    assert args.electrical_quantity == "voltage"
+    assert args.waterfall2d_fmax == 500 and args.fmax == 2000
+    assert args.vibration_start == "2026-10-15 15:00:00"
+
+
+def test_mrpm_detection_and_raw_rpm_plot_are_separate_inputs(tmp_path):
+    source, mrpm, raw = (tmp_path / name for name in ["sensor.csv", "mrpm.csv", "raw_rpm.csv"])
+    for file in (source, mrpm, raw):
+        file.touch()
+    args = parser().parse_args(
+        build_arguments(
+            {
+                "input": str(source),
+                "output": str(tmp_path),
+                "rpm_csv": str(mrpm),
+                "raw_rpm_csv": str(raw),
+                "raw_rpm_column": "val_rpm",
+            },
+            ["fft"],
+        )
+    )
+    assert args.rpm_csv == mrpm
+    assert args.raw_rpm_csv == raw
+    assert args.raw_rpm_column == "val_rpm"
