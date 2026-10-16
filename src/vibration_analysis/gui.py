@@ -281,8 +281,8 @@ class App:
         self.field(
             analysis_tab, "Detrend", "detrend", "constant", 1, 2, ["constant", "linear", "none"]
         )
-        self.field(analysis_tab, "Plot minimum [Hz]", "fmin", "0", 2)
-        self.field(analysis_tab, "Plot maximum [Hz] (optional)", "fmax", "", 2, 2)
+        self.field(analysis_tab, "Trimmed frequency min [Hz]", "fmin", "0", 2)
+        self.field(analysis_tab, "Trimmed frequency max [Hz]", "fmax", "", 2, 2)
         self.field(analysis_tab, "RMS bands (e.g. 100:500)", "bands", "", 3)
         self.field(analysis_tab, "PSD high-pass [Hz] (0 = off)", "psd_highpass_hz", "10", 3, 2)
         self.field(analysis_tab, "Waterfall frames (0 = all)", "waterfall_max_frames", "60", 4)
@@ -307,7 +307,7 @@ class App:
         ).grid(row=3, column=0, columnspan=4, sticky="w", pady=(10, 0))
         ttk.Label(
             analysis_tab,
-            text="HPF applies to PSD, PSD-derived RMS and spectrogram. Order is per pass; forward–backward filtering doubles the roll-off order. FFT, waterfall and time trace use the original signal.",
+            text="Frequency plots save broadband and trimmed views. Frequency limits crop the display. HPF applies to PSD, PSD-derived RMS and spectrogram. Order is per pass; forward–backward filtering doubles the roll-off order. FFT, waterfall and time trace use the original signal.",
             wraplength=750,
         ).grid(row=6, column=0, columnspan=4, sticky="w", pady=(10, 0))
         self.field(interval_tab, "Interval start [s]", "start_seconds", "0", 0)

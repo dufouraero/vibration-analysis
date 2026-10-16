@@ -234,7 +234,18 @@ def test_auto_alignment_recovers_known_delay():
         estimate_offset(recording, reference, np.full(len(rpm), 4000), 0, 500)
 
 
-def test_batch_folder_structure_trim_and_comparison_exports(tmp_path, capsys):
+def test_batch_folder_structure_trim_and_comparison_exports(tmp_path, capsys, monkeypatch):
+    from matplotlib.figure import Figure
+
+    saved_fft_limits = {}
+    original_savefig = Figure.savefig
+
+    def capture_limits(fig, filename, *args, **kwargs):
+        if str(filename).endswith(("fft_broadband.png", "fft_trimmed.png")):
+            saved_fft_limits[str(filename)] = fig.axes[0].get_xlim()
+        return original_savefig(fig, filename, *args, **kwargs)
+
+    monkeypatch.setattr(Figure, "savefig", capture_limits)
     fs = 128
     time = np.arange(180 * fs) / fs
     values = np.sin(2 * np.pi * 20 * time)
@@ -278,6 +289,8 @@ def test_batch_folder_structure_trim_and_comparison_exports(tmp_path, capsys):
                 "spectrogram",
                 "--dpi",
                 "35",
+                "--fmax",
+                "30",
                 "--waterfall2d-fmax",
                 "40",
                 "--gui-progress",
@@ -286,9 +299,12 @@ def test_batch_folder_structure_trim_and_comparison_exports(tmp_path, capsys):
         == 0
     )
     test = output / "test_01"
-    assert (test / "whole_test/01_accel/fft.png").is_file()
-    assert (test / "whole_test/01_accel/spectrogram.png").is_file()
+    assert (test / "whole_test/01_accel/fft_broadband.png").is_file()
+    assert (test / "whole_test/01_accel/spectrogram_broadband.png").is_file()
     metadata = json.loads((test / "whole_test/01_accel/summary.json").read_text())
+    assert metadata["frequency_plot_views_hz"]["broadband"] == [0, 64]
+    assert metadata["frequency_plot_views_hz"]["trimmed"] == [0, 30]
+    assert saved_fft_limits[str(test / "whole_test/01_accel/fft_broadband.png")] == (0, 64)
     assert metadata["spectrogram_display"]["rpm_panel"]
     labels = metadata["spectrogram_display"]["operating_points"]
     assert len(labels) == 2
@@ -298,10 +314,13 @@ def test_batch_folder_structure_trim_and_comparison_exports(tmp_path, capsys):
     holds = list((test / "operating_points").iterdir())
     assert len(holds) == 2
     summary = json.loads((holds[0] / "01_accel/summary.json").read_text())
+    assert summary["frequency_plot_views_hz"]["trimmed"] == [0, 30]
+    for folder in holds:
+        assert saved_fft_limits[str(folder / "01_accel/fft_trimmed.png")] == (0, 30)
     assert summary["analysis_interval"]["trim_start_seconds"] == 2
     assert summary["operating_context"]["mean_rpm"] > 0
-    assert (test / "comparisons/01_accel/fft_rpm_waterfall.png").is_file()
-    assert (test / "comparisons/01_accel/fft_rpm_waterfall_2d.png").is_file()
+    assert (test / "comparisons/01_accel/fft_rpm_waterfall_trimmed.png").is_file()
+    assert (test / "comparisons/01_accel/fft_rpm_waterfall_2d_trimmed.png").is_file()
     assert (test / "comparisons/01_accel/fft_rpm_waterfall_2d_broadband.png").is_file()
     limits = json.loads((test / "comparisons/01_accel/waterfall_2d_display.json").read_text())
     assert limits["broadband_hz"] == [0, 64]
@@ -309,7 +328,9 @@ def test_batch_folder_structure_trim_and_comparison_exports(tmp_path, capsys):
     # The detection mRPM CSV must never implicitly populate the simple raw RPM plot.
     assert not (test / "operating_conditions.png").exists()
     assert not (output / "operating_conditions.png").exists()
-    assert (test / "comparisons/01_accel/psd_comparison.png").is_file()
+    assert (test / "comparisons/01_accel/psd_comparison_trimmed.png").is_file()
+    assert (test / "comparisons/01_accel/psd_comparison_broadband.png").is_file()
+    assert (test / "comparisons/01_accel/fft_rpm_waterfall_broadband.png").is_file()
     data = np.load(test / "comparisons/01_accel/operating_point_spectra.npz")
     assert data["mean_window_peak_amplitude"].shape[0] == 2
     assert (output / "alignment.json").is_file()

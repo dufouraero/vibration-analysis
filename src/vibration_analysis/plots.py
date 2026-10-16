@@ -23,6 +23,16 @@ def spectrogram_color_limits(density, range_db=60, headroom_db=6, lower_db=None,
     return float(lower), float(upper)
 
 
+def psd_band_rms(result, low, high):
+    selected = (result.frequency >= low) & (result.frequency <= high)
+    return float(np.sqrt(result.psd[selected].sum() * result.summary["psd_bin_width_hz"]))
+
+
+def frequency_views(fmin, fmax, nyquist):
+    """The same explicit naming and frequency ranges for every spectral export."""
+    return (("broadband", 0, nyquist), ("trimmed", fmin, fmax))
+
+
 def save_plots(
     result,
     time,
@@ -44,6 +54,75 @@ def save_plots(
     spectrogram_upper_db=None,
     rpm_points=None,
 ):
+    """Compute spectra once, then render a full-band and selected-band view."""
+    common = {
+        "unit": unit,
+        "title": title,
+        "dpi": dpi,
+        "spectrogram_range_db": spectrogram_range_db,
+        "spectrogram_colormap": spectrogram_colormap,
+        "spectrogram_interpolation": spectrogram_interpolation,
+        "waterfall_max_frames": waterfall_max_frames,
+        "spectrogram_headroom_db": spectrogram_headroom_db,
+        "spectrogram_lower_db": spectrogram_lower_db,
+        "spectrogram_upper_db": spectrogram_upper_db,
+        "rpm_points": rpm_points,
+    }
+    if "time" in plots:
+        _save_plot_view(
+            result, time, values, directory, plots={"time"}, fmin=fmin, fmax=fmax, **common
+        )
+    spectral = set(plots) - {"time"}
+    if not spectral:
+        return
+    if "spectrogram" in spectral:
+        # Keep colour meanings identical between the paired spectrograms.
+        lower, upper = spectrogram_color_limits(
+            result.spectrogram_psd,
+            spectrogram_range_db,
+            spectrogram_headroom_db,
+            spectrogram_lower_db,
+            spectrogram_upper_db,
+        )
+        common.update(spectrogram_lower_db=lower, spectrogram_upper_db=upper)
+    for label, low, high in frequency_views(fmin, fmax, result.summary["nyquist_hz"]):
+        _save_plot_view(
+            result,
+            time,
+            values,
+            directory,
+            plots=spectral,
+            fmin=low,
+            fmax=high,
+            view_suffix="_" + label,
+            view_label=label.capitalize(),
+            **common,
+        )
+
+
+def _save_plot_view(
+    result,
+    time,
+    values,
+    directory,
+    *,
+    unit,
+    title,
+    plots,
+    fmin,
+    fmax,
+    dpi,
+    spectrogram_range_db=60,
+    spectrogram_colormap="viridis",
+    spectrogram_interpolation="bilinear",
+    waterfall_max_frames=60,
+    spectrogram_headroom_db=6,
+    spectrogram_lower_db=None,
+    spectrogram_upper_db=None,
+    rpm_points=None,
+    view_suffix="",
+    view_label="",
+):
     plt.rcParams.update(
         {
             "axes.grid": True,
@@ -56,7 +135,7 @@ def save_plots(
     )
 
     def save(fig, name):
-        fig.savefig(directory / f"{name}.png", dpi=dpi, bbox_inches="tight")
+        fig.savefig(directory / f"{name}{view_suffix}.png", dpi=dpi, bbox_inches="tight")
         plt.close(fig)
 
     cutoff = result.summary["psd_highpass_hz"]
@@ -78,10 +157,13 @@ def save_plots(
             xlim=(fmin, fmax),
             xlabel="Frequency [Hz]",
             ylabel=f"Peak amplitude [{unit}]",
-            title=f"{title} | FFT amplitude",
+            title=f"{title} | Full-record FFT amplitude"
+            + f" | {view_label}"
+            + f"\nRecord {result.summary['record_duration_s']:.4g} s | Bin spacing {result.summary['fft_bin_width_hz']:.4g} Hz",
         )
         save(fig, "fft")
     if "psd" in plots:
+        band_rms = psd_band_rms(result, fmin, fmax)
         for logarithmic in (False, True):
             fig, ax = plt.subplots(figsize=(11, 4), layout="constrained")
             mask = (
@@ -107,7 +189,9 @@ def save_plots(
                 xlim=(left, fmax),
                 xlabel="Frequency [Hz]",
                 ylabel=f"PSD [({unit})²/Hz]",
-                title=f"{title} | Welch PSD{filter_label}\nRMS = {result.summary['welch_rms']:.4g} {unit}",
+                title=f"{title} | Welch PSD | {view_label}{filter_label}\n"
+                f"Band RMS ({fmin:g}–{fmax:.5g} Hz) = {band_rms:.4g} {unit} | "
+                f"Full-band RMS = {result.summary['welch_rms']:.4g} {unit}",
             )
             save(fig, "psd_log_x" if logarithmic else "psd_linear_x")
     selected = (result.frequency >= fmin) & (result.frequency <= fmax)
@@ -178,7 +262,7 @@ def save_plots(
             ylabel="Frequency [Hz]",
             ylim=(fmin, fmax),
             title=(
-                f"{title} | Spectrogram{filter_label}\n"
+                f"{title} | Spectrogram | {view_label}{filter_label}\n"
                 f"Window {result.summary['spectrogram_segment_seconds'] * 1000:.3g} ms | "
                 f"Hop {hop * 1000:.3g} ms | Bin spacing {df:.3g} Hz"
             ),
@@ -208,7 +292,8 @@ def save_plots(
             xlabel="Frequency [Hz]",
             ylabel="Window center [s]",
             zlabel=f"Peak amplitude [{unit}]",
-            title=f"{title} | FFT waterfall | {len(indices)} of {frame_count} frames",
+            xlim=(fmin, fmax),
+            title=f"{title} | FFT waterfall | {view_label} | {len(indices)} of {frame_count} frames",
         )
         ax.view_init(elev=28, azim=-65)
         save(fig, "waterfall")

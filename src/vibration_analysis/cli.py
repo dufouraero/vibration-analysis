@@ -162,8 +162,17 @@ def parser():
         metavar="LOW:HIGH",
         help="Band RMS in Hz; repeatable, e.g. --band 100:500.",
     )
-    run.add_argument("--fmin", type=float, default=0, help="Plot minimum frequency, Hz.")
-    run.add_argument("--fmax", type=float, help="Plot maximum frequency, Hz (default Nyquist).")
+    run.add_argument(
+        "--fmin",
+        type=float,
+        default=0,
+        help="Trimmed-view minimum frequency, Hz; broadband views still start at zero.",
+    )
+    run.add_argument(
+        "--fmax",
+        type=float,
+        help="Trimmed-view maximum frequency, Hz (default Nyquist); broadband images are also saved.",
+    )
     run.add_argument(
         "--plots",
         nargs="+",
@@ -420,7 +429,7 @@ def export_recording(args, recording, interval, bands, context=None, rpm_points=
         raise ValueError("Waterfall maximum frames must be 0 (all) or a positive integer.")
     if not np.isfinite(args.spectrogram_range_db) or not 0 < args.spectrogram_range_db <= 200:
         raise ValueError("Spectrogram color range must be between 0 and 200 dB.")
-    from .plots import spectrogram_color_limits
+    from .plots import psd_band_rms, spectrogram_color_limits
 
     spectrogram_color_limits(
         np.array([1.0]),
@@ -520,6 +529,14 @@ def export_recording(args, recording, interval, bands, context=None, rpm_points=
                 )
             },
             **result.summary,
+            "frequency_plot_views_hz": {
+                "broadband": [0, recording.sample_rate / 2],
+                "trimmed": [args.fmin, fmax],
+            },
+            "psd_display_rms": {
+                "broadband": result.summary["welch_rms"],
+                "trimmed": psd_band_rms(result, args.fmin, fmax),
+            },
             "waterfall_display": {
                 "max_frames": args.waterfall_max_frames,
                 "displayed_frames": len(result.time)
@@ -537,11 +554,7 @@ def export_recording(args, recording, interval, bands, context=None, rpm_points=
                     rpm_points and not args.no_spectrogram_rpm and "spectrogram" in plots
                 ),
                 "limits_db": spectrogram_color_limits(
-                    result.spectrogram_psd[
-                        :,
-                        (result.spectrogram_frequency >= args.fmin)
-                        & (result.spectrogram_frequency <= fmax),
-                    ],
+                    result.spectrogram_psd,
                     args.spectrogram_range_db,
                     args.spectrogram_headroom_db,
                     args.spectrogram_lower_db,
@@ -551,6 +564,7 @@ def export_recording(args, recording, interval, bands, context=None, rpm_points=
                 else None,
                 "colormap": args.spectrogram_colormap,
                 "interpolation": args.spectrogram_interpolation,
+                "shared_color_limits_between_views": True,
             },
         }
         (directory / "summary.json").write_text(

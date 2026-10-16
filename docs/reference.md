@@ -209,9 +209,9 @@ results/
           01_sensor_name/
       comparisons/
         01_sensor_name/
-          fft_rpm_waterfall.png
-          fft_rpm_waterfall_2d.png
-          psd_comparison.png
+          fft_rpm_waterfall_trimmed.png
+          fft_rpm_waterfall_2d_trimmed.png
+          psd_comparison_trimmed.png
           operating_point_spectra.npz
           operating_points.csv
     test_02/
@@ -341,12 +341,12 @@ Each channel gets a numbered, sanitized subfolder under `--output`:
 | File | Contents |
 | --- | --- |
 | `time.png` | Calibrated retained time signal, on the original CSV elapsed timeline |
-| `fft.png`, `fft.csv` | Full-record one-sided **peak** amplitude spectrum plus phase in radians in CSV |
-| `psd_linear_x.png` | Welch PSD, linear frequency axis, log density axis |
-| `psd_log_x.png` | Same Welch PSD, log frequency axis, log density axis; DC omitted |
+| `fft_broadband.png`, `fft_trimmed.png`, `fft.csv` | Full-record one-sided **peak** amplitude spectrum plus phase in radians in CSV |
+| `psd_linear_x_broadband.png`, `psd_linear_x_trimmed.png` | Welch PSD, linear frequency axis, log density axis |
+| `psd_log_x_broadband.png`, `psd_log_x_trimmed.png` | Same Welch PSD, log frequency axis, log density axis; DC omitted |
 | `psd.csv` | All one-sided frequency bins and PSD in unit²/Hz, including DC |
-| `waterfall.png` | 3D sequence of windowed FFT peak amplitude spectra versus time |
-| `spectrogram.png` | Time–frequency PSD heatmap, logarithmic density color scale |
+| `waterfall_broadband.png`, `waterfall_trimmed.png` | 3D sequence of windowed FFT peak amplitude spectra versus time |
+| `spectrogram_broadband.png`, `spectrogram_trimmed.png` | Time–frequency PSD heatmap, logarithmic density color scale |
 | `time_frequency.npz` | Windowed FFT amplitudes/PSD plus separate spectrogram arrays and coordinates |
 | `summary.json` | Acquisition/settings, time-domain peak/RMS, Welch RMS, band RMS |
 
@@ -455,7 +455,7 @@ resampled or changed.
 Each operating-point comparison saves two 2D waterfall plots:
 
 - `fft_rpm_waterfall_2d_broadband.png`: 0 Hz to Nyquist, regardless of other plot limits.
-- `fft_rpm_waterfall_2d.png`: the selected frequency view. Set **Analysis settings → 2D waterfall max [Hz]** (`--waterfall2d-fmax`). Blank uses the general plot maximum, then Nyquist if both are blank.
+- `fft_rpm_waterfall_2d_trimmed.png`: the selected frequency view. Set **Analysis settings → 2D waterfall max [Hz]** (`--waterfall2d-fmax`). Blank uses the general plot maximum, then Nyquist if both are blank.
 
 All operating-point rows in each image share the same amplitude scale. Each
 image scales amplitudes for its own visible frequency range, allowing the limited
@@ -501,3 +501,30 @@ exported timestamp, including differing values. Such readings appear at the same
 x coordinate; no averaging, row selection or invented timestamp is applied.
 A progress note and plot JSON report repeated timestamps. This does not relax
 the independent mRPM importer used for alignment and hold detection.
+
+### Paired broadband and trimmed frequency plots
+
+All selected frequency plots save two images, in whole tests and individual
+operating points: `*_broadband.png` covers 0 Hz to Nyquist, and `*_trimmed.png`
+uses `--fmin`/`--fmax` (GUI **Trimmed frequency min/max [Hz]**). Log-frequency PSD
+views start at the first positive bin when the lower limit is zero. A blank
+maximum uses Nyquist, so the two views may be identical.
+
+This applies to FFT, linear/log-frequency PSD, spectrogram, time waterfall,
+operating-point 3D/2D waterfalls and operating-point PSD comparisons. The 2D
+waterfall retains its dedicated `--waterfall2d-fmax` override for the trimmed
+view. Spectrograms crop frequency on the vertical axis; their time range is
+unchanged, and the pair shares one colour scale calculated from the full band.
+Time-history and raw RPM/electrical plots retain their chosen time windows.
+
+The PSD titles distinguish RMS integrated over the displayed band from full-band
+RMS. `summary.json` records `frequency_plot_views_hz`, `psd_display_rms` and
+shared spectrogram colour limits. Frequency limits change the view, not the input
+signal. Numerical exports remain full bandwidth. Spectra are calculated once
+and rendered twice; additional PNG exports take more rendering time.
+
+The full-record FFT title reports its record duration and bin spacing. It uses
+one transform over the entire interval. RPM comparison waterfalls average
+short-window FFT magnitudes (default 0.5 s windows), so their peak heights can
+differ for drifting tones and intermittent signals. Longer duration alone does
+not reduce the amplitude of a steady bin-centred sinusoid.

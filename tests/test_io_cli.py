@@ -117,11 +117,16 @@ def test_demo_and_all_exports(tmp_path):
     )
     folder = output / "01_accel_steady_g"
     expected = {
-        "fft.png",
-        "psd_linear_x.png",
-        "psd_log_x.png",
-        "spectrogram.png",
-        "waterfall.png",
+        "fft_broadband.png",
+        "fft_trimmed.png",
+        "psd_linear_x_broadband.png",
+        "psd_linear_x_trimmed.png",
+        "psd_log_x_broadband.png",
+        "psd_log_x_trimmed.png",
+        "spectrogram_broadband.png",
+        "spectrogram_trimmed.png",
+        "waterfall_broadband.png",
+        "waterfall_trimmed.png",
         "time.png",
         "fft.csv",
         "psd.csv",

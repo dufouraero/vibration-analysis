@@ -55,15 +55,22 @@ Defaults are a starting point; these controls are in the window:
 
 | Tab | Main controls |
 | --- | --- |
-| **Analysis settings** | Welch window length, overlap and window type; PSD high-pass cutoff/order; frequency limits; **2D waterfall max [Hz]**. |
+| **Analysis settings** | Welch window length, overlap and window type; PSD high-pass cutoff/order; **Trimmed frequency min/max [Hz]**; **2D waterfall max [Hz]**. |
 | **Spectrogram** | Independent window/overlap, colour range and lower/upper PSD limits. Increase the upper limit or automatic headroom to reduce bright saturation. |
 | **Interval & trim** | Elapsed-time bounds and trimming. With mRPM, the default 5 s trim at each end applies to each detected hold; whole-test plots retain transitions. |
 | **mRPM detection** | Alignment and minimum test/hold duration, RPM drift and scatter limits. |
 | **Operating data CSVs** | Optional raw RPM and electrical column overrides. Usually leave these on automatic detection. |
 
-The 2D operating-point waterfall saves **both broadband and limited-frequency
-views**. Set **2D waterfall max [Hz]** for the limited view; blank uses the general
-plot maximum. Broadband always extends from 0 Hz to Nyquist.
+All frequency plots save **both broadband and trimmed-frequency views**, named
+`*_broadband.png` and `*_trimmed.png`. This includes FFTs, PSDs (linear and log
+frequency axes), spectrograms and waterfalls, in whole tests and operating points.
+Set **Trimmed frequency min/max [Hz]** for the trimmed view; leave maximum blank
+for Nyquist. Spectrograms crop the frequency axis and share colour limits between
+views. PSD titles state both displayed-band and full-band RMS. Time plots keep
+the selected time interval.
+
+For the 2D operating-point waterfall, set **2D waterfall max [Hz]** to override the trimmed maximum; blank uses the general
+trimmed maximum. Broadband always extends from 0 Hz to Nyquist.
 
 ## Find your results
 
@@ -72,7 +79,7 @@ from the vibration CSV plus a timestamp. Previous runs are preserved.
 
 With mRPM, each detected test contains:
 
-- **whole_test/** — plots for the full test.
+- **whole_test/** — plots for the full test. Frequency plots include both broadband and trimmed views.
 - **operating_points/** — plots for each detected, trimmed hold.
 - **comparisons/** — operating-point FFT waterfalls and PSD comparisons, including both 2D waterfall views.
 

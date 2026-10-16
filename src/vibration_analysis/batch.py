@@ -65,7 +65,7 @@ def _overview(args, recording, time, rpm, runs, bounds=None):
 
 
 def _comparisons(args, root, points, unit):
-    from .plots import plt
+    from .plots import frequency_views, plt
 
     if not points:
         return
@@ -90,29 +90,40 @@ def _comparisons(args, root, points, unit):
         table = pd.DataFrame([point["metadata"] for point in points])
         table["welch_rms"] = [r["summary"]["welch_rms"] for r in reports]
         table.to_csv(directory / "operating_points.csv", index=False)
-        selected = (frequency >= args.fmin) & (frequency <= (args.fmax or frequency[-1]))
+        nyquist = reports[0]["summary"]["nyquist_hz"]
+        views = frequency_views(args.fmin, args.fmax or nyquist, nyquist)
         if any(p in args.plots for p in ("all", "fft", "waterfall")):
-            fig = plt.figure(figsize=(11, 6), layout="constrained")
-            ax = fig.add_subplot(111, projection="3d")
-            for i, spectrum in enumerate(amplitude):
-                ax.plot(
-                    frequency[selected], np.full(selected.sum(), i + 1), spectrum[selected], lw=0.9
+            for view_label, view_min, view_max in views:
+                selected = (frequency >= view_min) & (frequency <= view_max)
+                fig = plt.figure(figsize=(11, 6), layout="constrained")
+                ax = fig.add_subplot(111, projection="3d")
+                for i, spectrum in enumerate(amplitude):
+                    ax.plot(
+                        frequency[selected],
+                        np.full(selected.sum(), i + 1),
+                        spectrum[selected],
+                        lw=0.9,
+                    )
+                ax.set(
+                    xlim=(view_min, view_max),
+                    xlabel="Frequency [Hz]",
+                    ylabel="Point / RPM",
+                    zlabel=f"Mean window peak amplitude [{unit}]",
+                    title=f"{reports[0]['channel']} | FFT comparison | {view_label} (unfiltered)\n{args.segment_seconds:g} s {args.window} windows; magnitude averaged",
                 )
-            ax.set(
-                xlabel="Frequency [Hz]",
-                ylabel="Point / RPM",
-                zlabel=f"Mean window peak amplitude [{unit}]",
-                title=f"{reports[0]['channel']} | FFT comparison (unfiltered)\n{args.segment_seconds:g} s {args.window} windows; magnitude averaged",
-            )
-            ax.set_yticks(
-                np.arange(1, len(means) + 1),
-                [f"{i + 1}: {value:.0f}" for i, value in enumerate(means)],
-            )
-            ax.tick_params(axis="y", labelsize=8)
-            ax.yaxis.labelpad = 16
-            ax.view_init(elev=28, azim=-65)
-            fig.savefig(directory / "fft_rpm_waterfall.png", dpi=args.dpi, bbox_inches="tight")
-            plt.close(fig)
+                ax.set_yticks(
+                    np.arange(1, len(means) + 1),
+                    [f"{i + 1}: {value:.0f}" for i, value in enumerate(means)],
+                )
+                ax.tick_params(axis="y", labelsize=8)
+                ax.yaxis.labelpad = 16
+                ax.view_init(elev=28, azim=-65)
+                fig.savefig(
+                    directory / f"fft_rpm_waterfall_{view_label}.png",
+                    dpi=args.dpi,
+                    bbox_inches="tight",
+                )
+                plt.close(fig)
             zoom_max = args.waterfall2d_fmax if args.waterfall2d_fmax is not None else args.fmax
             zoom_max = frequency[-1] if zoom_max is None else zoom_max
             if (
@@ -137,7 +148,12 @@ def _comparisons(args, root, points, unit):
                     reports[0]["summary"]["nyquist_hz"],
                     "broadband",
                 ),
-                ("fft_rpm_waterfall_2d.png", args.fmin, zoom_max, "selected frequency range"),
+                (
+                    "fft_rpm_waterfall_2d_trimmed.png",
+                    args.fmin,
+                    zoom_max,
+                    "trimmed frequency range",
+                ),
             ):
                 view_selected = (frequency >= view_min) & (frequency <= view_max)
                 if not np.any(view_selected):
@@ -178,23 +194,26 @@ def _comparisons(args, root, points, unit):
                 fig.savefig(directory / filename, dpi=args.dpi, bbox_inches="tight")
                 plt.close(fig)
         if any(p in args.plots for p in ("all", "psd")):
-            fig, ax = plt.subplots(figsize=(11, 5), layout="constrained")
-            for i, density in enumerate(psd):
-                ax.plot(
-                    frequency[selected],
-                    np.maximum(density[selected], 1e-30),
-                    label=f"{i + 1}: {means[i]:.0f} RPM",
-                    lw=0.9,
+            for view_label, view_min, view_max in views:
+                selected = (frequency >= view_min) & (frequency <= view_max)
+                fig, ax = plt.subplots(figsize=(11, 5), layout="constrained")
+                for i, density in enumerate(psd):
+                    ax.plot(
+                        frequency[selected],
+                        np.maximum(density[selected], 1e-30),
+                        label=f"{i + 1}: {means[i]:.0f} RPM | Band RMS {np.sqrt(density[selected].sum() * (frequency[1] - frequency[0])):.3g} {unit}",
+                        lw=0.9,
+                    )
+                ax.set(
+                    xlim=(view_min, view_max),
+                    yscale="log",
+                    xlabel="Frequency [Hz]",
+                    ylabel=f"PSD [({unit})²/Hz]",
+                    title=f"{reports[0]['channel']} | Operating-point PSDs | {view_label} | HPF {args.psd_highpass_hz:g} Hz",
                 )
-            ax.set(
-                yscale="log",
-                xlabel="Frequency [Hz]",
-                ylabel=f"PSD [({unit})²/Hz]",
-                title=f"{reports[0]['channel']} | Operating-point PSDs | HPF {args.psd_highpass_hz:g} Hz",
-            )
-            ax.legend()
-            fig.savefig(directory / "psd_comparison.png", dpi=args.dpi)
-            plt.close(fig)
+                ax.legend()
+                fig.savefig(directory / f"psd_comparison_{view_label}.png", dpi=args.dpi)
+                plt.close(fig)
 
 
 def run_rpm_analysis(args, recording, bands):
