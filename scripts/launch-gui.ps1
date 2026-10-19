@@ -1,3 +1,4 @@
+param([switch]$Dashboard)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 $repoRoot = Split-Path $PSScriptRoot -Parent
@@ -17,7 +18,8 @@ try {
         throw "Dependency setup failed. See $logPath for details."
     }
     $pythonPath = Join-Path $repoRoot '.venv\Scripts\pythonw.exe'
-    Start-Process -FilePath $pythonPath -ArgumentList '-m', 'vibration_analysis.gui' -WorkingDirectory $repoRoot -WindowStyle Hidden
+    $moduleName = if ($Dashboard) { 'vibration_analysis.dashboard' } else { 'vibration_analysis.gui' }
+    Start-Process -FilePath $pythonPath -ArgumentList '-m', $moduleName -WorkingDirectory $repoRoot -WindowStyle Hidden
 } catch {
     [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, 'Vibration analysis setup', 'OK', 'Error') | Out-Null
 }

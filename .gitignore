@@ -12,3 +12,4 @@ results/
 .DS_Store
 setup.log
 .pytest-tmp/
+.dashboard-cache/

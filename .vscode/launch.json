@@ -2,6 +2,20 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Vibration Analysis — Interactive Dashboard",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "vibration_analysis.dashboard",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "windows": {
+                "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe"
+            },
+            "console": "internalConsole",
+            "justMyCode": true,
+            "preLaunchTask": "Prepare vibration environment"
+        },
+        {
             "name": "Vibration Analysis — Desktop GUI",
             "type": "debugpy",
             "request": "launch",

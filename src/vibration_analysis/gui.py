@@ -423,6 +423,7 @@ class App:
         actions = ttk.Frame(outer)
         actions.pack(fill="x", pady=12)
         self.run_button = self.button(actions, "Run selected analyses", self.run, row=0, column=0)
+        self.button(actions, "Interactive dashboard", self.open_dashboard, row=0, column=3, padx=8)
         self.open_button = self.button(
             actions, "Open results folder", self.open_results, row=0, column=1, padx=10
         )
@@ -755,6 +756,17 @@ class App:
             import webbrowser
 
             webbrowser.open(destination.resolve().as_uri())
+
+    def open_dashboard(self):
+        python = (
+            Path(sys.executable).with_name("python.exe")
+            if os.name == "nt"
+            else Path(sys.executable)
+        )
+        subprocess.Popen(
+            [str(python), "-m", "vibration_analysis.dashboard"],
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
 
     def close(self):
         if self.busy:

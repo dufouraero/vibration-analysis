@@ -8,10 +8,19 @@
             "windows": {
                 "command": "${env:USERPROFILE}\\.local\\bin\\uv.exe"
             },
-            "args": ["sync", "--locked"],
-            "options": { "cwd": "${workspaceFolder}" },
+            "args": [
+                "sync",
+                "--locked"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
             "problemMatcher": [],
-            "presentation": { "reveal": "silent", "panel": "dedicated", "close": true }
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated",
+                "close": true
+            }
         },
         {
             "label": "Open Vibration Analysis",
@@ -20,11 +29,54 @@
             "windows": {
                 "command": "${env:USERPROFILE}\\.local\\bin\\uv.exe"
             },
-            "args": ["run", "--locked", "python", "-m", "vibration_analysis.gui"],
-            "options": { "cwd": "${workspaceFolder}" },
+            "args": [
+                "run",
+                "--locked",
+                "python",
+                "-m",
+                "vibration_analysis.gui"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
             "problemMatcher": [],
-            "group": { "kind": "build", "isDefault": true },
-            "presentation": { "reveal": "silent", "panel": "dedicated", "close": true }
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated",
+                "close": true
+            }
+        },
+        {
+            "label": "Open Interactive Dashboard",
+            "type": "process",
+            "command": "uv",
+            "windows": {
+                "command": "${env:USERPROFILE}\\.local\\bin\\uv.exe"
+            },
+            "args": [
+                "run",
+                "--locked",
+                "python",
+                "-m",
+                "vibration_analysis.dashboard"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated",
+                "close": true
+            }
         }
     ]
 }
