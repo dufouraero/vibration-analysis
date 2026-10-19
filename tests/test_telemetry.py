@@ -7,6 +7,50 @@ import pytest
 from vibration_analysis.telemetry import Trace, read_electrical, save_operating_conditions
 
 
+@pytest.mark.parametrize("fit", [True, False])
+def test_root_fits_telemetry_union_but_test_keeps_requested_bounds(tmp_path, monkeypatch, fit):
+    from matplotlib import dates as mdates
+    from matplotlib.figure import Figure
+
+    captured = []
+    monkeypatch.setattr(
+        Figure, "savefig", lambda fig, *a, **k: captured.append(fig.axes[0].get_xlim())
+    )
+    rpm = Trace(
+        np.array([99.0, 102.0, 104.0, 106.0, 111.0]),
+        np.arange(5.0),
+        "Engine speed [RPM]",
+        "rpm.csv",
+        "rpm",
+    )
+    volts = Trace(
+        np.array([101.0, 108.0]), np.array([57.0, 56.0]), "Voltage [V]", "volts.csv", "voltage"
+    )
+    save_operating_conditions(tmp_path, [rpm, volts], bounds=(100, 110), fit_to_data=fit)
+    meta = json.loads((tmp_path / "operating_conditions.json").read_text())
+    expected = [101, 108] if fit else [100, 110]
+    assert meta["clock_bounds_epoch_s"] == expected
+    assert meta["requested_clock_bounds_epoch_s"] == [100, 110]
+    np.testing.assert_allclose(
+        captured[0],
+        mdates.date2num(pd.to_datetime(expected, unit="s", utc=True).to_pydatetime()),
+        atol=1e-12,
+    )
+    assert pd.read_csv(tmp_path / "operating_conditions_rpm.csv")["value"].tolist() == [1, 2, 3]
+    assert meta["traces"][1]["samples"] == 2
+
+
+def test_no_telemetry_in_window_preserves_requested_bounds(tmp_path, monkeypatch):
+    from matplotlib.figure import Figure
+
+    monkeypatch.setattr(Figure, "savefig", lambda *a, **k: None)
+    rpm = Trace(np.array([1.0, 2.0, 3.0]), np.zeros(3), "Engine speed [RPM]", "rpm.csv", "rpm")
+    save_operating_conditions(tmp_path, [rpm], bounds=(100, 110), fit_to_data=True)
+    meta = json.loads((tmp_path / "operating_conditions.json").read_text())
+    assert meta["clock_bounds_epoch_s"] == [100, 110]
+    assert meta["traces"][0]["samples"] == 0
+
+
 def test_electrical_prefers_voltage_and_can_select_current(tmp_path):
     path = tmp_path / "electrical.csv"
     pd.DataFrame(

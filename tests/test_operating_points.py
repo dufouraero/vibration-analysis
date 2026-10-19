@@ -332,6 +332,11 @@ def test_batch_folder_structure_trim_and_comparison_exports(tmp_path, capsys, mo
     assert (test / "comparisons/01_accel/psd_comparison_broadband.png").is_file()
     assert (test / "comparisons/01_accel/fft_rpm_waterfall_broadband.png").is_file()
     data = np.load(test / "comparisons/01_accel/operating_point_spectra.npz")
+    assert (test / "comparisons/01_accel/harmonic_amplitude_vs_rpm.png").is_file()
+    assert (test / "comparisons/01_accel/harmonic_amplitude_vs_rpm_panels.png").is_file()
+    candidates = pd.read_csv(test / "comparisons/01_accel/harmonic_peaks.csv")
+    assert len(candidates) == 20
+    assert candidates.loc[candidates.expected_hz > 64, "peak_amplitude"].isna().all()
     assert data["mean_window_peak_amplitude"].shape[0] == 2
     assert (output / "alignment.json").is_file()
     assert (output / "detection_overview.png").is_file()

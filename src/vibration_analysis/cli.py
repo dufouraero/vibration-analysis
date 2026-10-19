@@ -59,6 +59,17 @@ def parser():
     )
     run.add_argument("--rpm-time-column")
     run.add_argument(
+        "--harmonic-orders",
+        default="1,2,3,4,5,6,7,8,9,10",
+        help="Shaft orders to track against mRPM, including fractions; blank disables.",
+    )
+    run.add_argument(
+        "--harmonic-tolerance-hz",
+        type=float,
+        default=5,
+        help="Half-width around order × RPM/60; at least one FFT bin is searched.",
+    )
+    run.add_argument(
         "--grafana-start",
         help="Optional local Grafana window start: YYYY-MM-DD HH:MM:SS or HH:MM:SS.",
     )
@@ -316,6 +327,11 @@ def run_analysis(args):
         not np.isfinite(args.waterfall2d_fmax) or args.waterfall2d_fmax <= args.fmin
     ):
         raise ValueError("2D waterfall max frequency must be finite and greater than plot minimum.")
+    from .harmonics import parse_orders
+
+    parse_orders(args.harmonic_orders)
+    if not np.isfinite(args.harmonic_tolerance_hz) or args.harmonic_tolerance_hz < 0:
+        raise ValueError("Order search tolerance must be finite and nonnegative.")
     emit(args, "Reading the vibration CSV…")
     bands = []
     for band in args.band:
@@ -402,6 +418,7 @@ def run_analysis(args):
             [args.raw_rpm_trace, args.electrical_trace],
             timezone=args.grafana_timezone,
             bounds=bounds,
+            fit_to_data=True,
             dpi=args.dpi,
         )
     emit(args, "Generating plots and numerical results…")

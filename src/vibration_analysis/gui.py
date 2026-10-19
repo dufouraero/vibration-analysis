@@ -70,6 +70,7 @@ def build_arguments(settings, plots):
         "fmin": "--fmin",
         "fmax": "--fmax",
         "waterfall2d_fmax": "--waterfall2d-fmax",
+        "harmonic_tolerance_hz": "--harmonic-tolerance-hz",
         "raw_rpm_time_column": "--raw-rpm-time-column",
         "raw_rpm_column": "--raw-rpm-column",
         "electrical_time_column": "--electrical-time-column",
@@ -127,6 +128,8 @@ def build_arguments(settings, plots):
                 "grafana_timezone": "--grafana-timezone",
             }
         )
+    if "harmonic_orders" in settings:
+        args.extend(["--harmonic-orders", settings["harmonic_orders"].strip()])
     for name, flag in mapping.items():
         value = settings.get(name, "").strip()
         if value:
@@ -288,6 +291,19 @@ class App:
         self.field(analysis_tab, "Waterfall frames (0 = all)", "waterfall_max_frames", "60", 4)
         self.field(analysis_tab, "HPF order per pass", "psd_filter_order", "4", 4, 2)
         self.field(analysis_tab, "2D waterfall max [Hz] (optional)", "waterfall2d_fmax", "", 5)
+        self.field(
+            analysis_tab,
+            "Shaft orders (comma-separated)",
+            "harmonic_orders",
+            "1,2,3,4,5,6,7,8,9,10",
+            6,
+        )
+        self.field(analysis_tab, "Order search ± [Hz]", "harmonic_tolerance_hz", "5", 6, 2)
+        ttk.Label(
+            analysis_tab,
+            text="Orders use mRPM: frequency = order × RPM / 60. Fractional orders allowed. Clear orders to disable. Local FFT peaks are candidates, not proof of resonance.",
+            wraplength=900,
+        ).grid(row=7, column=0, columnspan=4, sticky="w", pady=(6, 0))
         self.field(electrical_tab, "Electrical time column (auto)", "electrical_time_column", "", 0)
         self.field(electrical_tab, "Electrical value column (auto)", "electrical_column", "", 0, 2)
         self.field(
@@ -309,7 +325,7 @@ class App:
             analysis_tab,
             text="Frequency plots save broadband and trimmed views. Frequency limits crop the display. HPF applies to PSD, PSD-derived RMS and spectrogram. Order is per pass; forward–backward filtering doubles the roll-off order. FFT, waterfall and time trace use the original signal.",
             wraplength=750,
-        ).grid(row=6, column=0, columnspan=4, sticky="w", pady=(10, 0))
+        ).grid(row=8, column=0, columnspan=4, sticky="w", pady=(10, 0))
         self.field(interval_tab, "Interval start [s]", "start_seconds", "0", 0)
         self.field(interval_tab, "Interval end [s] (blank = file end)", "end_seconds", "", 0, 2)
         self.field(interval_tab, "Trim from start [s]", "trim_start_seconds", "5", 1)

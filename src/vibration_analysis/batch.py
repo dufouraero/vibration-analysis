@@ -65,6 +65,7 @@ def _overview(args, recording, time, rpm, runs, bounds=None):
 
 
 def _comparisons(args, root, points, unit):
+    from .harmonics import order_plots, overlay_orders, parse_orders, track_orders
     from .plots import frequency_views, plt
 
     if not points:
@@ -80,6 +81,24 @@ def _comparisons(args, root, points, unit):
         )
         psd = np.array([np.interp(frequency, r["frequency"], r["psd"]) for r in reports])
         means = np.array([point["metadata"]["mean_rpm"] for point in points])
+        orders = parse_orders(getattr(args, "harmonic_orders", "1,2,3,4,5,6,7,8,9,10"))
+        harmonic_table = None
+        if orders and any(p in args.plots for p in ("all", "fft", "waterfall")):
+            tolerance = getattr(args, "harmonic_tolerance_hz", 5)
+            harmonic_table = track_orders(reports, means, orders, tolerance)
+            harmonic_table.to_csv(directory / "harmonic_peaks.csv", index=False)
+            _json(
+                directory / "harmonic_tracking.json",
+                {
+                    "orders": orders,
+                    "search_tolerance_hz": tolerance,
+                    "unit": unit,
+                    "method": "Strongest local maximum within max(tolerance, one bin) of order × mean RPM / 60. No extrapolation. Ambiguous overlapping search widths are rejected.",
+                    "amplitude": "Unfiltered, window magnitudes averaged; peak amplitude, not RMS",
+                    "interpretation": "Candidates only. Mount/sensor clipping, noise and unrelated tones may affect peaks. Amplitude rise does not by itself prove resonance.",
+                },
+            )
+            order_plots(directory, harmonic_table, orders, unit, reports[0]["channel"], args.dpi)
         np.savez_compressed(
             directory / "operating_point_spectra.npz",
             frequency_hz=frequency,
@@ -116,6 +135,23 @@ def _comparisons(args, root, points, unit):
                     [f"{i + 1}: {value:.0f}" for i, value in enumerate(means)],
                 )
                 ax.tick_params(axis="y", labelsize=8)
+                if harmonic_table is not None:
+                    for order_index, order in enumerate(orders):
+                        rows = harmonic_table[harmonic_table.order == order]
+                        visible = (rows.expected_hz >= view_min) & (rows.expected_hz <= view_max)
+                        heights = rows.peak_amplitude.to_numpy().copy()
+                        heights[~visible.to_numpy()] = np.nan
+                        ax.plot(
+                            rows.peak_hz,
+                            rows.point,
+                            heights,
+                            "o--",
+                            ms=3,
+                            lw=0.8,
+                            color=f"C{order_index % 10}",
+                            label=f"{order:g}×",
+                        )
+                    ax.legend(title="Order candidates", fontsize=7, ncol=2, loc="upper left")
                 ax.yaxis.labelpad = 16
                 ax.view_init(elev=28, azim=-65)
                 fig.savefig(
@@ -176,6 +212,8 @@ def _comparisons(args, root, points, unit):
                     axis.fill_between(
                         frequency[view_selected], spectrum[view_selected], alpha=0.08, color=color
                     )
+                    if harmonic_table is not None:
+                        overlay_orders(axis, harmonic_table, orders, i + 1, view_min, view_max)
                     axis.set(ylim=(0, maximum), xlim=(view_min, view_max))
                     axis.set_ylabel(
                         f"{i + 1}: {means[i]:.0f} RPM",
@@ -343,6 +381,7 @@ def run_rpm_analysis(args, recording, bands):
         traces,
         timezone=args.grafana_timezone,
         bounds=(origin + low - offset, origin + high - offset),
+        fit_to_data=True,
         dpi=args.dpi,
     )
     test_rows = []

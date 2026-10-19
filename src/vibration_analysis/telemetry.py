@@ -84,7 +84,9 @@ def read_electrical(
     )
 
 
-def save_operating_conditions(directory, traces, *, timezone="Europe/Zurich", bounds=None, dpi=160):
+def save_operating_conditions(
+    directory, traces, *, timezone="Europe/Zurich", bounds=None, dpi=160, fit_to_data=False
+):
     """One row per available source; time is the Grafana wall clock, without resampling."""
     from matplotlib import dates as mdates
 
@@ -102,7 +104,14 @@ def save_operating_conditions(directory, traces, *, timezone="Europe/Zurich", bo
         figsize=(12, 2.5 * len(traces) + 1),
         layout="constrained",
     )
-    metadata = {"timezone": timezone, "clock_bounds_epoch_s": bounds, "traces": []}
+    metadata = {
+        "timezone": timezone,
+        "clock_bounds_epoch_s": bounds,
+        "requested_clock_bounds_epoch_s": bounds,
+        "fit_to_available_telemetry": fit_to_data,
+        "traces": [],
+    }
+    data_start, data_end = np.inf, -np.inf
     for index, (axis, trace) in enumerate(zip(axes[:, 0], traces)):
         selected = (
             np.ones(len(trace.seconds), dtype=bool)
@@ -112,6 +121,8 @@ def save_operating_conditions(directory, traces, *, timezone="Europe/Zurich", bo
         time, values = trace.seconds[selected], trace.values[selected]
         dates = pd.to_datetime(time, unit="s", utc=True).tz_convert(timezone)
         if len(time):
+            data_start = min(data_start, float(time[0]))
+            data_end = max(data_end, float(time[-1]))
             intervals = np.diff(trace.seconds)
             cadence = np.median(intervals[intervals > 0])
             gap = np.flatnonzero(np.diff(time) > 3 * cadence) + 1
@@ -149,9 +160,15 @@ def save_operating_conditions(directory, traces, *, timezone="Europe/Zurich", bo
     axes[-1, 0].xaxis.set_major_locator(locator)
     axes[-1, 0].xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator, tz=zone))
     axes[-1, 0].set_xlabel(f"Grafana local time [{timezone}]")
-    if bounds is not None:
+    plot_bounds = bounds
+    if fit_to_data and bounds is not None and np.isfinite([data_start, data_end]).all():
+        plot_bounds = (data_start, data_end)
+        if data_start == data_end:
+            plot_bounds = (max(bounds[0], data_start - 0.5), min(bounds[1], data_end + 0.5))
+        metadata["clock_bounds_epoch_s"] = plot_bounds
+    if plot_bounds is not None:
         axes[-1, 0].set_xlim(
-            mdates.date2num(pd.to_datetime(bounds, unit="s", utc=True).to_pydatetime())
+            mdates.date2num(pd.to_datetime(plot_bounds, unit="s", utc=True).to_pydatetime())
         )
     axes[0, 0].set_title("Operating conditions")
     fig.savefig(directory / "operating_conditions.png", dpi=dpi)

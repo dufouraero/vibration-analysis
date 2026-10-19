@@ -96,3 +96,7 @@ folder. Results are ignored by Git.
 
 For command-line use, detailed CSV options, analysis definitions and development,
 see the [advanced reference](docs/reference.md).
+
+## Harmonic amplitudes versus RPM
+
+In **Analysis settings**, choose **Shaft orders (comma-separated)** and **Order search ± [Hz]**. With an mRPM log and FFT or Waterfall selected, each test's comparisons/sensor folder includes amplitude-versus-RPM curves, individual order panels, peak data and harmonic overlays on both waterfalls. See the [harmonic tracking guide](docs/harmonics.md).
